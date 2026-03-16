@@ -93,6 +93,9 @@ class RTC(Experiment):
         7. Remove the first behavior entry (if it is not counting).
         8. Filter port entries so that only those after the first sound cue remain.
         """
+        # Remove the disconnection in p1-240612-064528
+        # self.remove_time_segments_from_block('p1-240612-064528', (2030, 2058.51))
+
         for trial_folder, trial in self.trials.items():
             print(f"Processing trial {trial_folder}...")
 
@@ -101,10 +104,14 @@ class RTC(Experiment):
             trial.downsample(target_fs=100)
 
             # 2) trim LED/artifact
+            # Remove the last 30s for p1-240612-064528 because of hugh artifact
             trial.remove_initial_LED_artifact(t=30)
-            trial.remove_final_data_segment(t=10)
-
-            # 3) low‐pass
+            if trial_folder == 'p1-240614-064528':
+                trial.remove_final_data_segment(t=30)
+            else: 
+                trial.remove_final_data_segment(t=10)
+			
+			# 3) low‐pass
             trial.lowpass_filter(cutoff_hz=3.0)
 
             # 4) high‐pass recentered
@@ -193,7 +200,7 @@ class RTC(Experiment):
         """
         Finds the first port entry occurring ≥4 s after each sound cue.
         If a cue is np.nan, emits np.nan.  If an ongoing port-entry spans
-        the 4 s threshold, uses threshold_time; otherwise picks the first
+        the 4s threshold, uses threshold_time; otherwise picks the first
         port-onset ≥ threshold.  Always returns a list the same length
         as filtered_sound_cues.
         """
@@ -1070,6 +1077,332 @@ class RTC(Experiment):
 
         self.spont_peaks = pd.DataFrame(rows)
         return self.spont_peaks
+
+
+    def plot_processing_progression(self, trial, sound_cues=None, figsize=(14, 12), save_path=None, trial_name=None,
+                                   start_time=None, end_time=None):
+        """
+        Plots the signal progression through all processing stages in a single figure with 6 subplots.
+        This is a migrated version of Trial.plot_processing_progression that includes filtered_sound_cues.
+        
+        The subplots show:
+        1. Raw DA and ISOS (before low pass filter)
+        2. After low pass filter
+        3. After high pass recentered
+        4. After IRLS fit (DA and fitted ISOS)
+        5. dF/F
+        6. z-score
+        
+        Each subplot includes grey dashed vertical lines marking filtered_sound_cues timestamps.
+        
+        Parameters:
+        -----------
+        trial : Trial object
+            The trial to plot.
+        sound_cues : array-like, optional
+            Array of filtered sound cue timestamps to mark on the plots.
+        figsize : tuple
+            Figure size (width, height) in inches. Default is (14, 12).
+        save_path : str, optional
+            Path to save the figure. If None, figure is displayed but not saved.
+        trial_name : str, optional
+            Title for the overall figure.
+        start_time : float, optional
+            Start time (in seconds) for the time window to plot. If None, starts from beginning.
+        end_time : float, optional
+            End time (in seconds) for the time window to plot. If None, plots to end of recording.
+        """
+        # Create figure with 6 subplots stacked vertically, sharing x-axis
+        fig, axes = plt.subplots(6, 1, figsize=figsize, sharex=True)
+        
+        # Get the raw traces (before any processing)
+        raw_DA = trial.streams['DA']
+        raw_ISOS = trial.streams['ISOS']
+        
+        # Determine the common time axis
+        timestamps = trial.timestamps
+        
+        # Filter data to time window if specified
+        if start_time is not None or end_time is not None:
+            start = start_time if start_time is not None else timestamps[0]
+            end = end_time if end_time is not None else timestamps[-1]
+            
+            mask = (timestamps >= start) & (timestamps <= end)
+            timestamps = timestamps[mask]
+            raw_DA = raw_DA[mask]
+            raw_ISOS = raw_ISOS[mask]
+            
+            # Also filter sound_cues to only show those in the time window
+            if sound_cues is not None:
+                sound_cues = [cue for cue in sound_cues if cue >= start and cue <= end]
+        
+        # Helper function to plot sound cues on a given axis
+        def plot_sound_cues(ax, sound_cues):
+            """Plot sound cues as grey dashed vertical lines"""
+            if sound_cues is not None and len(sound_cues) > 0:
+                for cue in sound_cues:
+                    if not np.isnan(cue):
+                        ax.axvline(cue, color='grey', linestyle='--', alpha=0.6, linewidth=1)
+        
+        # ===== Subplot 1: Raw DA and ISOS (before low pass) =====
+        ax1_left = axes[0]
+        ax1_right = ax1_left.twinx()
+        
+        line1_da = ax1_left.plot(timestamps, raw_DA, label='DA', linewidth=1.5, alpha=0.8, color='steelblue')
+        line1_isos = ax1_right.plot(timestamps, raw_ISOS, label='ISOS', linewidth=1.5, alpha=0.8, color='darkorange')
+        
+        ax1_left.set_ylabel('DA (V)', fontsize=10, color='steelblue')
+        ax1_right.set_ylabel('ISOS (V)', fontsize=10, color='darkorange')
+        ax1_left.tick_params(axis='y', labelcolor='steelblue')
+        ax1_right.tick_params(axis='y', labelcolor='darkorange')
+        ax1_left.set_title('1. Raw DA and ISOS (Before Low Pass Filter)', fontsize=11, fontweight='bold')
+        ax1_left.grid(True, alpha=0.3)
+        plot_sound_cues(ax1_left, sound_cues)
+        
+        # Combined legend
+        lines = line1_da + line1_isos
+        labels = [l.get_label() for l in lines]
+        ax1_left.legend(lines, labels, loc='upper right', fontsize=9)
+        
+        # ===== Subplot 2: After low pass filter =====
+        ax2_left = axes[1]
+        ax2_right = ax2_left.twinx()
+        
+        if hasattr(trial, 'updated_DA_after_lowpass') and hasattr(trial, 'updated_ISOS_after_lowpass'):
+            da_lowpass = trial.updated_DA_after_lowpass
+            isos_lowpass = trial.updated_ISOS_after_lowpass
+            
+            # Apply time window filter
+            if start_time is not None or end_time is not None:
+                trial_timestamps = trial.timestamps
+                start = start_time if start_time is not None else trial_timestamps[0]
+                end = end_time if end_time is not None else trial_timestamps[-1]
+                mask = (trial_timestamps >= start) & (trial_timestamps <= end)
+                da_lowpass = da_lowpass[mask]
+                isos_lowpass = isos_lowpass[mask]
+            
+            line2_da = ax2_left.plot(timestamps, da_lowpass, label='DA (Low Pass)', linewidth=1.5, alpha=0.8, color='steelblue')
+            line2_isos = ax2_right.plot(timestamps, isos_lowpass, label='ISOS (Low Pass)', linewidth=1.5, alpha=0.8, color='darkorange')
+            
+            ax2_left.set_ylabel('DA (V)', fontsize=10, color='steelblue')
+            ax2_right.set_ylabel('ISOS (V)', fontsize=10, color='darkorange')
+            ax2_left.tick_params(axis='y', labelcolor='steelblue')
+            ax2_right.tick_params(axis='y', labelcolor='darkorange')
+            
+            # Combined legend
+            lines = line2_da + line2_isos
+            labels = [l.get_label() for l in lines]
+            ax2_left.legend(lines, labels, loc='upper right', fontsize=9)
+        else:
+            ax2_left.text(0.5, 0.5, 'Low pass filter not yet applied', 
+                        ha='center', va='center', transform=ax2_left.transAxes, fontsize=10)
+            ax2_left.set_ylabel('DA (V)', fontsize=10)
+        
+        ax2_left.set_title('2. After Low Pass Filter (3 Hz)', fontsize=11, fontweight='bold')
+        ax2_left.grid(True, alpha=0.3)
+        plot_sound_cues(ax2_left, sound_cues)
+        
+        # ===== Subplot 3: After high pass recentered =====
+        ax3_left = axes[2]
+        ax3_right = ax3_left.twinx()
+        
+        da_highpass = trial.updated_DA
+        isos_highpass = trial.updated_ISOS
+        
+        # Apply time window filter
+        if start_time is not None or end_time is not None:
+            trial_timestamps = trial.timestamps
+            start = start_time if start_time is not None else trial_timestamps[0]
+            end = end_time if end_time is not None else trial_timestamps[-1]
+            mask = (trial_timestamps >= start) & (trial_timestamps <= end)
+            da_highpass = da_highpass[mask]
+            isos_highpass = isos_highpass[mask]
+        
+        line3_da = ax3_left.plot(timestamps, da_highpass, label='DA (High Pass Recentered)', linewidth=1.5, alpha=0.8, color='steelblue')
+        line3_isos = ax3_right.plot(timestamps, isos_highpass, label='ISOS (High Pass Recentered)', linewidth=1.5, alpha=0.8, color='darkorange')
+        
+        ax3_left.set_ylabel('DA (V)', fontsize=10, color='steelblue')
+        ax3_right.set_ylabel('ISOS (V)', fontsize=10, color='darkorange')
+        ax3_left.tick_params(axis='y', labelcolor='steelblue')
+        ax3_right.tick_params(axis='y', labelcolor='darkorange')
+        ax3_left.set_title('3. After High Pass Recentered (0.001 Hz)', fontsize=11, fontweight='bold')
+        ax3_left.grid(True, alpha=0.3)
+        plot_sound_cues(ax3_left, sound_cues)
+        
+        # Combined legend
+        lines = line3_da + line3_isos
+        labels = [l.get_label() for l in lines]
+        ax3_left.legend(lines, labels, loc='upper right', fontsize=9)
+        
+        # ===== Subplot 4: After IRLS fit (DA and fitted ISOS) =====
+        if hasattr(trial, 'isosbestic_fitted') and trial.isosbestic_fitted.size > 1:
+            da_irls = trial.updated_DA
+            isos_fitted = trial.isosbestic_fitted
+            
+            # Apply time window filter
+            if start_time is not None or end_time is not None:
+                trial_timestamps = trial.timestamps
+                start = start_time if start_time is not None else trial_timestamps[0]
+                end = end_time if end_time is not None else trial_timestamps[-1]
+                mask = (trial_timestamps >= start) & (trial_timestamps <= end)
+                da_irls = da_irls[mask]
+                isos_fitted = isos_fitted[mask]
+            
+            axes[3].plot(timestamps, da_irls, label='DA', linewidth=1.5, alpha=0.8, color='steelblue')
+            axes[3].plot(timestamps, isos_fitted, label='ISOS Fitted (IRLS)', linewidth=1.5, alpha=0.8, color='darkorange')
+            axes[3].set_ylabel('Voltage (V)', fontsize=10)
+            axes[3].set_title('4. After IRLS Fit (Robust Linear Regression)', fontsize=11, fontweight='bold')
+            axes[3].legend(loc='upper right', fontsize=9)
+            axes[3].grid(True, alpha=0.3)
+        else:
+            axes[3].text(0.5, 0.5, 'IRLS fit not yet computed', 
+                        ha='center', va='center', transform=axes[3].transAxes, fontsize=10)
+            axes[3].set_ylabel('Voltage (V)', fontsize=10)
+            axes[3].set_title('4. After IRLS Fit (Not Yet Computed)', fontsize=11, fontweight='bold')
+        plot_sound_cues(axes[3], sound_cues)
+        
+        # ===== Subplot 5: dF/F =====
+        if hasattr(trial, 'dFF') and trial.dFF is not None and trial.dFF.size > 1:
+            dff_data = trial.dFF
+            
+            # Apply time window filter
+            if start_time is not None or end_time is not None:
+                trial_timestamps = trial.timestamps
+                start = start_time if start_time is not None else trial_timestamps[0]
+                end = end_time if end_time is not None else trial_timestamps[-1]
+                mask = (trial_timestamps >= start) & (trial_timestamps <= end)
+                dff_data = dff_data[mask]
+            
+            axes[4].plot(timestamps, dff_data, linewidth=1.5, alpha=0.8, color='green')
+            axes[4].set_ylabel('ΔF/F', fontsize=10)
+            axes[4].set_title('5. Delta F/F (dF/F)', fontsize=11, fontweight='bold')
+            axes[4].grid(True, alpha=0.3)
+        else:
+            axes[4].text(0.5, 0.5, 'dF/F not yet computed', 
+                        ha='center', va='center', transform=axes[4].transAxes, fontsize=10)
+            axes[4].set_ylabel('ΔF/F', fontsize=10)
+            axes[4].set_title('5. Delta F/F (Not Yet Computed)', fontsize=11, fontweight='bold')
+        plot_sound_cues(axes[4], sound_cues)
+        
+        # ===== Subplot 6: z-score =====
+        if hasattr(trial, 'zscore') and trial.zscore is not None and trial.zscore.size > 1:
+            zscore_data = trial.zscore
+            
+            # Apply time window filter
+            if start_time is not None or end_time is not None:
+                trial_timestamps = trial.timestamps
+                start = start_time if start_time is not None else trial_timestamps[0]
+                end = end_time if end_time is not None else trial_timestamps[-1]
+                mask = (trial_timestamps >= start) & (trial_timestamps <= end)
+                zscore_data = zscore_data[mask]
+            
+            axes[5].plot(timestamps, zscore_data, linewidth=1.5, alpha=0.8, color='purple')
+            axes[5].set_ylabel('z-score', fontsize=10)
+            axes[5].set_xlabel('Time (seconds)', fontsize=10)
+            axes[5].set_title('6. Z-Score', fontsize=11, fontweight='bold')
+            axes[5].grid(True, alpha=0.3)
+        else:
+            axes[5].text(0.5, 0.5, 'z-score not yet computed', 
+                        ha='center', va='center', transform=axes[5].transAxes, fontsize=10)
+            axes[5].set_ylabel('z-score', fontsize=10)
+            axes[5].set_xlabel('Time (seconds)', fontsize=10)
+            axes[5].set_title('6. Z-Score (Not Yet Computed)', fontsize=11, fontweight='bold')
+        plot_sound_cues(axes[5], sound_cues)
+        
+        # Add overall title
+        fig.suptitle(trial_name, fontsize=14, fontweight='bold', y=0.995)
+        
+        # Adjust layout
+        plt.tight_layout(rect=[0, 0, 1, 0.99])
+        
+        # Save or show
+        if save_path is not None:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            # print(f"Figure saved to {save_path}")
+        
+        plt.show()
+
+    def plot_all_processing_progressions(self, save_directory=None, brain_region='NAc', start_time=None, end_time=None):
+        """
+        Plots the signal processing progression for all trials in the experiment.
+        
+        For each trial, generates a figure with 6 subplots showing:
+        1. Raw DA and ISOS (before low pass filter)
+        2. After low pass filter
+        3. After high pass recentered
+        4. After IRLS fit (DA and fitted ISOS)
+        5. dF/F
+        6. z-score
+        
+        Filtered sound cues are overlaid as grey dashed lines on all subplots.
+        
+        Parameters:
+        -----------
+        save_directory : str, optional
+            Directory path to save all figures. If None, figures are displayed but not saved.
+            If provided, figures will be saved as PNG files named by trial name.
+        brain_region : str, optional
+            Filter trials by brain region prefix: 'NAc' (prefix 'n') or 'mPFC' (prefix 'p').
+            Default is 'NAc'.
+        start_time : float, optional
+            Start time (in seconds) for the time window to plot. If None, starts from beginning.
+        end_time : float, optional
+            End time (in seconds) for the time window to plot. If None, plots to end of recording.
+        """
+        if not self.trials:
+            print("No trials loaded in the experiment.")
+            return
+        
+        if self.da_df.empty:
+            print("No dopamine data available. Please run extract_da_columns() first.")
+            return
+        
+        # Create save directory if provided
+        if save_directory is not None:
+            os.makedirs(save_directory, exist_ok=True)
+            print(f"Figures will be saved to: {save_directory}")
+        
+        # Add time window info to title if specified
+        time_window_str = ""
+        if start_time is not None or end_time is not None:
+            start = start_time if start_time is not None else "start"
+            end = end_time if end_time is not None else "end"
+            time_window_str = f" [{start}s - {end}s]"
+        
+        # Filter and sort trials by name
+        prefix = 'n' if brain_region == 'NAc' else 'p'
+        filtered_trials = [(name, trial) for name, trial in self.trials.items() 
+                          if name.startswith(prefix)]
+        filtered_trials.sort(key=lambda x: x[0])  # Sort by trial name
+        
+        # Iterate through sorted trials and plot
+        for trial_name, trial in filtered_trials:
+            # Look up the filtered_sound_cues from da_df for this trial
+            sound_cues = None
+            matching_rows = self.da_df[self.da_df['subject_name'].str.startswith(prefix)]
+            # Find the row that corresponds to this trial
+            for _, row in matching_rows.iterrows():
+                # Match by trial name (should be in row data or we can use file name)
+                if row.get('file name', '').startswith(trial_name) or trial_name in str(row.get('file name', '')):
+                    sound_cues = row.get('filtered_sound_cues', None)
+                    break
+            
+            # If no match found in da_df, sound_cues will remain None
+            if sound_cues is None:
+                print(f"Warning: No filtered_sound_cues found for trial {trial_name}")
+            
+            # Determine save path if save_directory is provided
+            save_path = None
+            if save_directory is not None:
+                save_path = os.path.join(save_directory, f"{trial_name}.png")
+            
+            # Create trial name with time window info
+            full_trial_name = trial_name + time_window_str
+            
+            # Call the plot_processing_progression method
+            self.plot_processing_progression(trial, sound_cues=sound_cues, figsize=(14, 12), 
+                                            save_path=save_path, trial_name=full_trial_name,
+                                            start_time=start_time, end_time=end_time)
 
 
 

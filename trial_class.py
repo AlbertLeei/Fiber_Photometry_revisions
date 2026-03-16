@@ -203,6 +203,9 @@ class Trial:
             # zero-phase filter
             self.updated_DA   = filtfilt(b, a, self.updated_DA,   padtype='even')
             self.updated_ISOS = filtfilt(b, a, self.updated_ISOS, padtype='even')
+            # Store the lowpass-filtered results for visualization
+            self.updated_DA_after_lowpass = self.updated_DA.copy()
+            self.updated_ISOS_after_lowpass = self.updated_ISOS.copy()
             # print(f"Low-pass filtered @ {cutoff_hz} Hz")
 
 
@@ -1068,3 +1071,161 @@ class Trial:
         # Store the computed arrays in new DataFrame columns.
         self.behaviors["Relative_Time_Axis"] = relative_time_list
         self.behaviors["Relative_Zscore"] = relative_zscore_list
+
+
+    '''********************************** PROCESSING PROGRESSION PLOT **********************************'''
+    def plot_processing_progression(self, figsize=(14, 12), save_path=None, trial_name=None):
+        """
+        Plots the signal progression through all processing stages in a single figure with 6 subplots.
+        
+        The subplots show:
+        1. Raw DA and ISOS (before low pass filter)
+        2. After low pass filter
+        3. After high pass recentered
+        4. After IRLS fit (DA and fitted ISOS)
+        5. dF/F
+        6. z-score
+        
+        Subplots 1-3 use dual y-axes for DA (left) and ISOS (right) to accommodate different signal ranges.
+        All plots share the same x-axis (time in seconds).
+        
+        Parameters:
+        -----------
+        figsize : tuple
+            Figure size (width, height) in inches. Default is (14, 12).
+        save_path : str, optional
+            Path to save the figure. If None, figure is displayed but not saved.
+        trial_name : str, optional
+            Title for the overall figure.
+        """
+        # Create figure with 6 subplots stacked vertically, sharing x-axis
+        fig, axes = plt.subplots(6, 1, figsize=figsize, sharex=True)
+        
+        # Get the raw traces (before any processing)
+        raw_DA = self.streams['DA']
+        raw_ISOS = self.streams['ISOS']
+        
+        # Determine the common time axis
+        # Note: timestamps may change after each processing step, so we'll reference the current one
+        timestamps = self.timestamps
+        
+        # ===== Subplot 1: Raw DA and ISOS (before low pass) =====
+        # Create dual y-axes: DA on left, ISOS on right
+        ax1_left = axes[0]
+        ax1_right = ax1_left.twinx()
+        
+        line1_da = ax1_left.plot(timestamps, raw_DA, label='DA', linewidth=1.5, alpha=0.8, color='steelblue')
+        line1_isos = ax1_right.plot(timestamps, raw_ISOS, label='ISOS', linewidth=1.5, alpha=0.8, color='darkorange')
+        
+        ax1_left.set_ylabel('DA (V)', fontsize=10, color='steelblue')
+        ax1_right.set_ylabel('ISOS (V)', fontsize=10, color='darkorange')
+        ax1_left.tick_params(axis='y', labelcolor='steelblue')
+        ax1_right.tick_params(axis='y', labelcolor='darkorange')
+        ax1_left.set_title('1. Raw DA and ISOS (Before Low Pass Filter)', fontsize=11, fontweight='bold')
+        ax1_left.grid(True, alpha=0.3)
+        
+        # Combined legend
+        lines = line1_da + line1_isos
+        labels = [l.get_label() for l in lines]
+        ax1_left.legend(lines, labels, loc='upper right', fontsize=9)
+        
+        # ===== Subplot 2: After low pass filter =====
+        # Use stored intermediate state after lowpass filtering
+        ax2_left = axes[1]
+        ax2_right = ax2_left.twinx()
+        
+        if hasattr(self, 'updated_DA_after_lowpass') and hasattr(self, 'updated_ISOS_after_lowpass'):
+            line2_da = ax2_left.plot(timestamps, self.updated_DA_after_lowpass, label='DA (Low Pass)', linewidth=1.5, alpha=0.8, color='steelblue')
+            line2_isos = ax2_right.plot(timestamps, self.updated_ISOS_after_lowpass, label='ISOS (Low Pass)', linewidth=1.5, alpha=0.8, color='darkorange')
+            
+            ax2_left.set_ylabel('DA (V)', fontsize=10, color='steelblue')
+            ax2_right.set_ylabel('ISOS (V)', fontsize=10, color='darkorange')
+            ax2_left.tick_params(axis='y', labelcolor='steelblue')
+            ax2_right.tick_params(axis='y', labelcolor='darkorange')
+            
+            # Combined legend
+            lines = line2_da + line2_isos
+            labels = [l.get_label() for l in lines]
+            ax2_left.legend(lines, labels, loc='upper right', fontsize=9)
+        else:
+            ax2_left.text(0.5, 0.5, 'Low pass filter not yet applied', 
+                        ha='center', va='center', transform=ax2_left.transAxes, fontsize=10)
+            ax2_left.set_ylabel('DA (V)', fontsize=10)
+        
+        ax2_left.set_title('2. After Low Pass Filter (3 Hz)', fontsize=11, fontweight='bold')
+        ax2_left.grid(True, alpha=0.3)
+        
+        # ===== Subplot 3: After high pass recentered =====
+        # This shows updated_DA/ISOS after high pass filtering
+        ax3_left = axes[2]
+        ax3_right = ax3_left.twinx()
+        
+        line3_da = ax3_left.plot(timestamps, self.updated_DA, label='DA (High Pass Recentered)', linewidth=1.5, alpha=0.8, color='steelblue')
+        line3_isos = ax3_right.plot(timestamps, self.updated_ISOS, label='ISOS (High Pass Recentered)', linewidth=1.5, alpha=0.8, color='darkorange')
+        
+        ax3_left.set_ylabel('DA (V)', fontsize=10, color='steelblue')
+        ax3_right.set_ylabel('ISOS (V)', fontsize=10, color='darkorange')
+        ax3_left.tick_params(axis='y', labelcolor='steelblue')
+        ax3_right.tick_params(axis='y', labelcolor='darkorange')
+        ax3_left.set_title('3. After High Pass Recentered (0.001 Hz)', fontsize=11, fontweight='bold')
+        ax3_left.grid(True, alpha=0.3)
+        
+        # Combined legend
+        lines = line3_da + line3_isos
+        labels = [l.get_label() for l in lines]
+        ax3_left.legend(lines, labels, loc='upper right', fontsize=9)
+        
+        # ===== Subplot 4: After IRLS fit (DA and fitted ISOS) =====
+        # Check if isosbestic_fitted exists
+        if hasattr(self, 'isosbestic_fitted') and self.isosbestic_fitted.size > 1:
+            axes[3].plot(timestamps, self.updated_DA, label='DA', linewidth=1.5, alpha=0.8, color='steelblue')
+            axes[3].plot(timestamps, self.isosbestic_fitted, label='ISOS Fitted (IRLS)', linewidth=1.5, alpha=0.8, color='darkorange')
+            axes[3].set_ylabel('Voltage (V)', fontsize=10)
+            axes[3].set_title('4. After IRLS Fit (Robust Linear Regression)', fontsize=11, fontweight='bold')
+            axes[3].legend(loc='upper right', fontsize=9)
+            axes[3].grid(True, alpha=0.3)
+        else:
+            axes[3].text(0.5, 0.5, 'IRLS fit not yet computed', 
+                        ha='center', va='center', transform=axes[3].transAxes, fontsize=10)
+            axes[3].set_ylabel('Voltage (V)', fontsize=10)
+            axes[3].set_title('4. After IRLS Fit (Not Yet Computed)', fontsize=11, fontweight='bold')
+        
+        # ===== Subplot 5: dF/F =====
+        if hasattr(self, 'dFF') and self.dFF is not None and self.dFF.size > 1:
+            axes[4].plot(timestamps, self.dFF, linewidth=1.5, alpha=0.8, color='green')
+            axes[4].set_ylabel('ΔF/F', fontsize=10)
+            axes[4].set_title('5. Delta F/F (dF/F)', fontsize=11, fontweight='bold')
+            axes[4].grid(True, alpha=0.3)
+        else:
+            axes[4].text(0.5, 0.5, 'dF/F not yet computed', 
+                        ha='center', va='center', transform=axes[4].transAxes, fontsize=10)
+            axes[4].set_ylabel('ΔF/F', fontsize=10)
+            axes[4].set_title('5. Delta F/F (Not Yet Computed)', fontsize=11, fontweight='bold')
+        
+        # ===== Subplot 6: z-score =====
+        if hasattr(self, 'zscore') and self.zscore is not None and self.zscore.size > 1:
+            axes[5].plot(timestamps, self.zscore, linewidth=1.5, alpha=0.8, color='purple')
+            axes[5].set_ylabel('z-score', fontsize=10)
+            axes[5].set_xlabel('Time (seconds)', fontsize=10)
+            axes[5].set_title('6. Z-Score', fontsize=11, fontweight='bold')
+            axes[5].grid(True, alpha=0.3)
+        else:
+            axes[5].text(0.5, 0.5, 'z-score not yet computed', 
+                        ha='center', va='center', transform=axes[5].transAxes, fontsize=10)
+            axes[5].set_ylabel('z-score', fontsize=10)
+            axes[5].set_xlabel('Time (seconds)', fontsize=10)
+            axes[5].set_title('6. Z-Score (Not Yet Computed)', fontsize=11, fontweight='bold')
+        
+        # Add overall title
+        fig.suptitle(trial_name, 
+                     fontsize=14, fontweight='bold', y=0.995)
+        
+        # Adjust layout
+        plt.tight_layout(rect=[0, 0, 1, 0.99])
+        
+        # Save or show
+        if save_path is not None:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            # print(f"Figure saved to {save_path}")
+        
+        plt.show()
