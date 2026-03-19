@@ -5,6 +5,7 @@ parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(parent_dir)
 
 from experiment_class import Experiment
+from matplotlib.ticker import MultipleLocator
 from trial_class import Trial
 import math
 import numpy as np
@@ -1312,9 +1313,15 @@ class RTC(Experiment):
         # Add overall title
         fig.suptitle(trial_name, fontsize=14, fontweight='bold', y=0.995)
         
-        # Adjust layout
-        plt.tight_layout(rect=[0, 0, 1, 0.99])
-        
+        # Set x-axis tick spacing (every 10 seconds)
+        axes[5].xaxis.set_major_locator(MultipleLocator(10))
+
+        for ax in axes.flat:
+            ax.tick_params(axis='x', labelbottom=True, labelrotation=90)
+
+        plt.subplots_adjust(hspace=0.6)
+        plt.tight_layout(rect=[0, 0.08, 1, 0.99])
+
         # Save or show
         if save_path is not None:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
