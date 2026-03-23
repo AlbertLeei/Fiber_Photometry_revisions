@@ -1309,6 +1309,14 @@ class RTC(Experiment):
             axes[5].set_title('6. Z-Score (Not Yet Computed)', fontsize=11, fontweight='bold')
         plot_sound_cues(axes[5], sound_cues)
         
+        # Generate x-ticks every 10 seconds for all subplots
+        xmin, xmax = axes[0].get_xlim()
+        xticks = np.arange(np.ceil(xmin / 10) * 10, xmax + 10, 10)
+        for ax in axes:
+            ax.set_xticks(xticks)
+            ax.tick_params(axis='x', labelbottom=True, labelrotation=90)
+            ax.set_xticklabels([f"{int(t)}" for t in xticks], fontsize=8)
+        
         # Add overall title
         fig.suptitle(trial_name, fontsize=14, fontweight='bold', y=0.995)
         
