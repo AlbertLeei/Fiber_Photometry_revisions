@@ -1160,6 +1160,55 @@ class RTC(Experiment):
         return self.spont_peaks
 
 
+    def plot_trial_by_name(self, trial_name, figsize=(14, 12), save_path=None, 
+                           start_time=None, end_time=None):
+        """
+        Plot the signal processing progression for a specific trial by its name.
+        
+        This function looks up the trial by name and retrieves its filtered sound cues,
+        then plots the complete processing progression (raw signal through all stages).
+        
+        Parameters:
+        -----------
+        trial_name : str
+            The name of the trial to plot (e.g., 'n001', 'p002', etc.)
+        figsize : tuple
+            Figure size (width, height) in inches. Default is (14, 12).
+        save_path : str, optional
+            Path to save the figure. If None, figure is displayed but not saved.
+        start_time : float, optional
+            Start time (in seconds) for the time window to plot. If None, starts from beginning.
+        end_time : float, optional
+            End time (in seconds) for the time window to plot. If None, plots to end of recording.
+        
+        Returns:
+        --------
+        None. Displays the plot (and saves if save_path is provided).
+        """
+        # Check if trial exists
+        if trial_name not in self.trials:
+            print(f"Error: Trial '{trial_name}' not found. Available trials: {list(self.trials.keys())}")
+            return
+        
+        trial = self.trials[trial_name]
+        
+        # Look up the filtered_sound_cues from da_df for this trial
+        sound_cues = None
+        if not self.da_df.empty:
+            for _, row in self.da_df.iterrows():
+                # Match by trial name in file name or subject name
+                if trial_name in str(row.get('file name', '')):
+                    sound_cues = row.get('filtered_sound_cues', None)
+                    break
+        
+        if sound_cues is None:
+            print(f"Warning: No filtered_sound_cues found for trial '{trial_name}'")
+        
+        # Call the plot_processing_progression method
+        self.plot_processing_progression(trial, sound_cues=sound_cues, figsize=figsize, 
+                                        save_path=save_path, trial_name=trial_name,
+                                        start_time=start_time, end_time=end_time)
+
     def plot_processing_progression(self, trial, sound_cues=None, figsize=(14, 12), save_path=None, trial_name=None,
                                    start_time=None, end_time=None):
         """
