@@ -119,8 +119,9 @@ class RTC(Experiment):
             trial.baseline_drift_highpass_recentered(cutoff=0.001)
 
             # 5) IRLS fit
-            trial.motion_correction_align_channels_IRLS(IRLS_constant=1.4)
+            trial.motion_correction_align_channels_IRLS(IRLS_constant=3)
 
+            # trial.baseline_drift_highpass_recentered(cutoff=0.001)
             # 6) compute dF/F
             trial.compute_dFF()
 
@@ -1329,89 +1330,77 @@ class RTC(Experiment):
         
         plt.show()
 
-    def plot_all_processing_progressions(self, save_directory=None, brain_region='NAc', start_time=None, end_time=None):
+    def plot_all_processing_progressions(self, save_directory=None, brain_region='NAc',
+                                    start_time=None, end_time=None, trial_id=None):
         """
-        Plots the signal processing progression for all trials in the experiment.
+        Same as before, but allows plotting a single trial if trial_id is provided.
         
-        For each trial, generates a figure with 6 subplots showing:
-        1. Raw DA and ISOS (before low pass filter)
-        2. After low pass filter
-        3. After high pass recentered
-        4. After IRLS fit (DA and fitted ISOS)
-        5. dF/F
-        6. z-score
-        
-        Filtered sound cues are overlaid as grey dashed lines on all subplots.
-        
-        Parameters:
-        -----------
-        save_directory : str, optional
-            Directory path to save all figures. If None, figures are displayed but not saved.
-            If provided, figures will be saved as PNG files named by trial name.
-        brain_region : str, optional
-            Filter trials by brain region prefix: 'NAc' (prefix 'n') or 'mPFC' (prefix 'p').
-            Default is 'NAc'.
-        start_time : float, optional
-            Start time (in seconds) for the time window to plot. If None, starts from beginning.
-        end_time : float, optional
-            End time (in seconds) for the time window to plot. If None, plots to end of recording.
+        trial_id : str, optional
+            Example: "p1", "n3". If provided, only that trial is plotted.
         """
+
         if not self.trials:
             print("No trials loaded in the experiment.")
             return
-        
+
         if self.da_df.empty:
             print("No dopamine data available. Please run extract_da_columns() first.")
             return
-        
-        # Create save directory if provided
+
         if save_directory is not None:
             os.makedirs(save_directory, exist_ok=True)
-            print(f"Figures will be saved to: {save_directory}")
-        
-        # Add time window info to title if specified
+
+        # time window label
         time_window_str = ""
         if start_time is not None or end_time is not None:
             start = start_time if start_time is not None else "start"
             end = end_time if end_time is not None else "end"
             time_window_str = f" [{start}s - {end}s]"
-        
-        # Filter and sort trials by name
-        prefix = 'n' if brain_region == 'NAc' else 'p'
-        filtered_trials = [(name, trial) for name, trial in self.trials.items() 
-                          if name.startswith(prefix)]
-        filtered_trials.sort(key=lambda x: x[0])  # Sort by trial name
-        
-        # Iterate through sorted trials and plot
+
+        # ===== KEY CHANGE =====
+        if trial_id is not None:
+            # Direct lookup of a single trial
+            if trial_id not in self.trials:
+                print(f"Trial {trial_id} not found.")
+                return
+
+            filtered_trials = [(trial_id, self.trials[trial_id])]
+
+        else:
+            # Original behavior: filter by brain region
+            prefix = 'n' if brain_region == 'NAc' else 'p'
+            filtered_trials = [(name, trial) for name, trial in self.trials.items()
+                            if name.startswith(prefix)]
+            filtered_trials.sort(key=lambda x: x[0])
+
+        # ===== LOOP =====
         for trial_name, trial in filtered_trials:
-            # Look up the filtered_sound_cues from da_df for this trial
+
+            # match sound cues
             sound_cues = None
-            matching_rows = self.da_df[self.da_df['subject_name'].str.startswith(prefix)]
-            # Find the row that corresponds to this trial
-            for _, row in matching_rows.iterrows():
-                # Match by trial name (should be in row data or we can use file name)
-                if row.get('file name', '').startswith(trial_name) or trial_name in str(row.get('file name', '')):
+            for _, row in self.da_df.iterrows():
+                if trial_name in str(row.get('file name', '')):
                     sound_cues = row.get('filtered_sound_cues', None)
                     break
-            
-            # If no match found in da_df, sound_cues will remain None
+
             if sound_cues is None:
                 print(f"Warning: No filtered_sound_cues found for trial {trial_name}")
-            
-            # Determine save path if save_directory is provided
+
             save_path = None
             if save_directory is not None:
                 save_path = os.path.join(save_directory, f"{trial_name}.png")
-            
-            # Create trial name with time window info
+
             full_trial_name = trial_name + time_window_str
-            
-            # Call the plot_processing_progression method
-            self.plot_processing_progression(trial, sound_cues=sound_cues, figsize=(14, 12), 
-                                            save_path=save_path, trial_name=full_trial_name,
-                                            start_time=start_time, end_time=end_time)
 
-
+            self.plot_processing_progression(
+                trial,
+                sound_cues=sound_cues,
+                figsize=(14, 12),
+                save_path=save_path,
+                trial_name=full_trial_name,
+                start_time=start_time,
+                end_time=end_time
+            )
 
 
 
