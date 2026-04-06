@@ -5,7 +5,6 @@ parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(parent_dir)
 
 from experiment_class import Experiment
-from matplotlib.ticker import MultipleLocator
 from trial_class import Trial
 import math
 import numpy as np
@@ -158,8 +157,89 @@ class RTC(Experiment):
             trial.rtc_events['port entries'].offset_times = trial.rtc_events['port entries'].offset[1:]
             
             valid_sound_cues = [t for t in trial.rtc_events['sound cues'].onset_times if t >= 200]
+			# Remove the last sound cues which induced by stop of the recordings
+            if trial_folder == 'nn1-250203-085508' or trial_folder == 'nn3-250203-085508' or \
+            trial_folder == 'pp1-250204-095252' or trial_folder == 'pp2-250204-095252':
+               valid_sound_cues = valid_sound_cues[:-2] if len(valid_sound_cues) > 0 else valid_sound_cues
+            elif trial_folder == 'n7-240912-095235':
+               pass
+            else:
+                if trial_folder == 'nn6-250204-075106':
+                    del valid_sound_cues[2]
+                    del valid_sound_cues[0]
+                elif trial_folder == 'pp6-250204-075106':
+                    del valid_sound_cues[0]
+                valid_sound_cues = valid_sound_cues[:-1] if len(valid_sound_cues) > 0 else valid_sound_cues
+            # Remove duplicate/clustered sound cues using offset-adjusted reference pattern
+            valid_sound_cues = self._remove_duplicate_sound_cues(valid_sound_cues)
+			
             trial.rtc_events['sound cues'].onset_times = valid_sound_cues
 
+
+    def _remove_duplicate_sound_cues(self, valid_sound_cues):
+        """
+        Remove duplicate/clustered sound cues by identifying temporal clusters and selecting
+        the cue closest to the expected reference pattern for each cluster.
+        
+        Parameters
+        ----------
+        valid_sound_cues : list or array
+            Sound cue timestamps to filter
+            
+        Returns
+        -------
+        filtered_cues : list
+            Filtered sound cues with duplicates removed
+        """
+        # Reference pattern for expected sound cue timing
+        reference_cues = np.array([60.010, 140.010, 230.010, 310.010, 385.010, 485.010, 580.010, 670.010, 750.010, 840.010, 940.010, 1030.010, 1150.010, 1240.010, 1325.010, 1415.010, 1510.010, 1630.010, 1710.010])
+        cluster_threshold = 30.0  # seconds - cues within this distance are considered a cluster (interval is 60-70s)
+        
+        valid_sound_cues_array = np.array(valid_sound_cues) if len(valid_sound_cues) > 0 else np.array([])
+        
+        if len(valid_sound_cues_array) == 0:
+            return []
+        
+        # Calculate offset: difference between first cue in data and first reference cue
+        offset = valid_sound_cues_array[0] - reference_cues[0]
+        adjusted_reference = reference_cues + offset
+        
+        filtered_cues = []
+        i = 0
+        
+        while i < len(valid_sound_cues_array):
+            # Find the cluster: all consecutive cues within cluster_threshold of the first cue
+            current_cue = valid_sound_cues_array[i]
+            cluster_end = i
+            
+            # Extend cluster while next cue is within threshold
+            while cluster_end + 1 < len(valid_sound_cues_array) and \
+                  valid_sound_cues_array[cluster_end + 1] - current_cue < cluster_threshold:
+                cluster_end += 1
+            
+            cluster_cues = valid_sound_cues_array[i:cluster_end + 1]
+            
+            if len(cluster_cues) == 1:
+                # Single cue in cluster - no duplicates, keep it
+                filtered_cues.append(cluster_cues[0])
+            else:
+                # Multiple cues in cluster - select the one closest to expected reference
+                expected_idx = len(filtered_cues)
+                
+                if expected_idx < len(adjusted_reference):
+                    expected_val = adjusted_reference[expected_idx]
+                    # Find cue closest to expected value
+                    distances = np.abs(cluster_cues - expected_val)
+                    best_local_idx = np.argmin(distances)
+                    filtered_cues.append(cluster_cues[best_local_idx])
+                else:
+                    # Beyond reference length, keep the first (or earliest) one
+                    filtered_cues.append(cluster_cues[0])
+            
+            # Move to after this cluster
+            i = cluster_end + 1
+        
+        return filtered_cues
 
 
     def remove_specified_subjects(self):
@@ -1080,6 +1160,55 @@ class RTC(Experiment):
         return self.spont_peaks
 
 
+    def plot_trial_by_name(self, trial_name, figsize=(14, 12), save_path=None, 
+                           start_time=None, end_time=None):
+        """
+        Plot the signal processing progression for a specific trial by its name.
+        
+        This function looks up the trial by name and retrieves its filtered sound cues,
+        then plots the complete processing progression (raw signal through all stages).
+        
+        Parameters:
+        -----------
+        trial_name : str
+            The name of the trial to plot (e.g., 'n001', 'p002', etc.)
+        figsize : tuple
+            Figure size (width, height) in inches. Default is (14, 12).
+        save_path : str, optional
+            Path to save the figure. If None, figure is displayed but not saved.
+        start_time : float, optional
+            Start time (in seconds) for the time window to plot. If None, starts from beginning.
+        end_time : float, optional
+            End time (in seconds) for the time window to plot. If None, plots to end of recording.
+        
+        Returns:
+        --------
+        None. Displays the plot (and saves if save_path is provided).
+        """
+        # Check if trial exists
+        if trial_name not in self.trials:
+            print(f"Error: Trial '{trial_name}' not found. Available trials: {list(self.trials.keys())}")
+            return
+        
+        trial = self.trials[trial_name]
+        
+        # Look up the filtered_sound_cues from da_df for this trial
+        sound_cues = None
+        if not self.da_df.empty:
+            for _, row in self.da_df.iterrows():
+                # Match by trial name in file name or subject name
+                if trial_name in str(row.get('file name', '')):
+                    sound_cues = row.get('filtered_sound_cues', None)
+                    break
+        
+        if sound_cues is None:
+            print(f"Warning: No filtered_sound_cues found for trial '{trial_name}'")
+        
+        # Call the plot_processing_progression method
+        self.plot_processing_progression(trial, sound_cues=sound_cues, figsize=figsize, 
+                                        save_path=save_path, trial_name=trial_name,
+                                        start_time=start_time, end_time=end_time)
+
     def plot_processing_progression(self, trial, sound_cues=None, figsize=(14, 12), save_path=None, trial_name=None,
                                    start_time=None, end_time=None):
         """
@@ -1310,18 +1439,20 @@ class RTC(Experiment):
             axes[5].set_title('6. Z-Score (Not Yet Computed)', fontsize=11, fontweight='bold')
         plot_sound_cues(axes[5], sound_cues)
         
+        # Generate x-ticks every 10 seconds for all subplots
+        xmin, xmax = axes[0].get_xlim()
+        xticks = np.arange(np.ceil(xmin / 10) * 10, xmax + 10, 10)
+        for ax in axes:
+            ax.set_xticks(xticks)
+            ax.tick_params(axis='x', labelbottom=True, labelrotation=90)
+            ax.set_xticklabels([f"{int(t)}" for t in xticks], fontsize=8)
+        
         # Add overall title
         fig.suptitle(trial_name, fontsize=14, fontweight='bold', y=0.995)
         
-        # Set x-axis tick spacing (every 10 seconds)
-        axes[5].xaxis.set_major_locator(MultipleLocator(10))
-
-        for ax in axes.flat:
-            ax.tick_params(axis='x', labelbottom=True, labelrotation=90)
-
-        plt.subplots_adjust(hspace=0.6)
-        plt.tight_layout(rect=[0, 0.08, 1, 0.99])
-
+        # Adjust layout
+        plt.tight_layout(rect=[0, 0, 1, 0.99])
+        
         # Save or show
         if save_path is not None:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
