@@ -854,6 +854,7 @@ class Reward_Competition(RTC):
                            title: str = None,
                            ylim: tuple = None,
                            figsize=(8,5),
+                           reward_line = True,
                            save_path: str = None):
         """
         Given the per-subject mean traces (output of compute_subject_mean_traces),
@@ -895,7 +896,8 @@ class Reward_Competition(RTC):
 
         # vertical onset lines
         ax.axvline(0, color="k",      ls="--", lw=2)
-        ax.axvline(4, color="#FF69B4",ls="--", lw=2)
+        if reward_line:
+            ax.axvline(4, color="#FF69B4",ls="--", lw=2)
 
         # labels & title
         ax.set_xlabel("Time (s)",         fontsize=14)
@@ -2121,3 +2123,189 @@ class Reward_Competition(RTC):
             'alone_vs_loss': {'t':stats['alone_vs_loss'][0],'p':stats['alone_vs_loss'][1],'d':stats['alone_vs_loss'][2]},
             'win_vs_loss':   {'t':stats['win_vs_loss'][0],'p':stats['win_vs_loss'][1],'d':stats['win_vs_loss'][2]},
         }
+
+
+    def build_transition_dfs(self,
+                            transitions=("win-win", "win-loss", "loss-win", "loss-loss"),
+                            drop_ties=True,
+                            drop_tangles=True):
+        """
+        Creates per-transition dataframes that mimic winner_df/loser_df structure:
+        each metric column becomes a list filtered down to events belonging to that transition.
+
+        Output saved as:
+        self.transition_dfs[transition] = df
+
+        Requires:
+        self.da_df contains 'filtered_winner_array' and the *_Zscore/*_Time_Axis list columns.
+        """
+
+        df = self.da_df.copy()
+
+        id_cols = ["subject_name", "file name", "trial"]
+        metric_cols = [c for c in df.columns if c not in id_cols]
+
+        def _as_list(x):
+            if isinstance(x, np.ndarray):
+                return x.tolist()
+            return x if isinstance(x, list) else []
+
+        def _label_outcome(w, subject):
+            # tie
+            if pd.isna(w):
+                return "tie"
+            # tangle placeholder
+            if isinstance(w, str) and w.strip().lower() == "tangle":
+                return "tangle"
+            # normal
+            return "win" if w == subject else "loss"
+
+        def _transition_for_index(outcomes, i):
+            """
+            Your rule:
+            - if current is tangle -> 'tangle'
+            - if previous is tangle -> 'tangle-win' or 'tangle-loss' (do not look further back)
+            - otherwise prev-current for win/loss only
+            """
+            curr = outcomes[i]
+
+            if curr == "tangle":
+                return "tangle"
+
+            # treat tie as non-transition unless you want them
+            if curr == "tie":
+                return "tie"
+
+            if i == 0:
+                return f"start-{curr}"
+
+            prev = outcomes[i-1]
+            if prev == "tangle":
+                return f"tangle-{curr}"
+            if prev == "tie":
+                return f"tie-{curr}"
+
+            return f"{prev}-{curr}"
+
+        def _filter_lists_by_mask(seq, keep_mask):
+            seq = _as_list(seq)
+            out = []
+            for i, val in enumerate(seq):
+                if i < len(keep_mask) and keep_mask[i]:
+                    out.append(val)
+            return out
+
+        transition_dfs = {}
+
+        for tr in transitions:
+            tr = tr.lower()
+            # build per-row masks, then apply to all metric columns
+            kept_rows = []
+            for _, row in df.iterrows():
+                wins = _as_list(row.get("filtered_winner_array", []))
+                subj = row["subject_name"]
+
+                outcomes = [_label_outcome(w, subj) for w in wins]
+                trans = [_transition_for_index(outcomes, i) for i in range(len(outcomes))]
+
+                # event keep mask for this transition
+                keep_mask = []
+                for t in trans:
+                    if drop_tangles and ("tangle" in t):
+                        keep_mask.append(False)
+                        continue
+                    if drop_ties and ("tie" in t):
+                        keep_mask.append(False)
+                        continue
+                    keep_mask.append(t == tr)
+
+                # apply mask to every metric column
+                new_row = {k: row[k] for k in id_cols}
+                for col in metric_cols:
+                    new_row[col] = _filter_lists_by_mask(row[col], keep_mask)
+
+                # keep only sessions that actually have >=1 event
+                # choose a representative list column to check; Tone_Zscore usually exists
+                rep = new_row.get("Tone_Zscore", [])
+                if isinstance(rep, list) and len(rep) > 0:
+                    kept_rows.append(new_row)
+
+            transition_dfs[tr] = pd.DataFrame(kept_rows)
+
+        self.transition_dfs = transition_dfs
+        return transition_dfs
+        
+    
+
+
+    def plot_transition_psth(
+        self,
+        transition: str,
+        event_type: str,                 # "Tone" or "PE"
+        brain_region: str,
+        time_window_s: tuple = None,     # example: (0 - 4, 10)
+        ylim: tuple = None,
+        title: str = None,
+        reward_line = True
+    ):
+        """
+        event_type sets what is time zero, because the underlying traces are already aligned to that event.
+        time_window_s crops the plotted window.
+        """
+        def _crop_subject_traces(subj_traces: pd.DataFrame, time_window_s: tuple) -> pd.DataFrame:
+            """
+            Expects columns: subject_name, mean_trace, time_axis
+            Crops each trace to the requested time window.
+            """
+            if time_window_s is None:
+                return subj_traces
+
+            t0, t1 = time_window_s
+            out_rows = []
+
+            for _, r in subj_traces.iterrows():
+                t = np.asarray(r["time_axis"], dtype=float)
+                y = np.asarray(r["mean_trace"], dtype=float)
+
+                L = min(len(t), len(y))
+                t = t[:L]
+                y = y[:L]
+
+                m = (t >= t0) & (t <= t1)
+                if not np.any(m):
+                    continue
+
+                out_rows.append({
+                    "subject_name": r["subject_name"],
+                    "time_axis": t[m],
+                    "mean_trace": y[m],
+                })
+
+            return pd.DataFrame(out_rows)
+        
+        if not hasattr(self, "transition_dfs"):
+            raise RuntimeError("Run build_transition_dfs() first.")
+
+        tr = transition.lower()
+        if tr not in self.transition_dfs:
+            raise KeyError(f"Transition '{transition}' not found.")
+
+        df_tr = self.transition_dfs[tr]
+
+        subj_traces = self.compute_subject_mean_traces(
+            df_tr,
+            event_type=event_type
+        )
+
+        subj_traces = _crop_subject_traces(subj_traces, time_window_s)
+
+        return self.plot_group_mean_traces(
+            subj_traces=subj_traces,
+            event_type=event_type,
+            brain_region=brain_region,
+            ylim=ylim,
+            title=title or f"{event_type} PSTH | {brain_region} | {tr}",
+            reward_line = reward_line
+        )
+
+

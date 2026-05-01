@@ -575,6 +575,117 @@ class RTC(Experiment):
         # return for chaining if you like
         return df
 
+    def compute_EI_DA_PrePE(self,
+                    tone_window: tuple[float, float] = (-4, 10),
+                    pe_window: tuple[float, float] = (-4, 10),
+                    tone_baseline_window: tuple[float, float] = (-4, 0),
+                    pe_baseline_window: tuple[float, float] = (-2, 0)):
+        """
+        Compute baseline-corrected peri-event z-score traces for Tone and PE.
+
+        tone_baseline_window is relative to cue.
+        pe_baseline_window   is relative to the PE (port entry / first lick).
+        """
+        df = self.da_df
+
+        # 1) find the finest dt across all trials
+        min_dt = np.inf
+        for _, row in df.iterrows():
+            ts = np.array(row['trial'].timestamps)
+            if ts.size > 1:
+                min_dt = min(min_dt, np.min(np.diff(ts)))
+        if not np.isfinite(min_dt):
+            raise RuntimeError("No valid timestamps found to establish dt.")
+
+        # 2) build common time-axes
+        tone_start, tone_end = tone_window
+        pe_start,   pe_end   = pe_window
+
+        t_bl_start, t_bl_end = tone_baseline_window
+        pe_bl_start, pe_bl_end = pe_baseline_window
+
+        tone_axis = np.arange(tone_start, tone_end, min_dt)
+        pe_axis   = np.arange(pe_start,   pe_end,   min_dt)
+
+        # 3) containers
+        tone_z, tone_t = [], []
+        pe_z,   pe_t   = [], []
+
+        # 4) iterate trials
+        for _, row in df.iterrows():
+            trial = row['trial']
+            ts    = np.array(trial.timestamps)
+            zs    = np.array(trial.zscore)
+
+            cues = row.get('filtered_sound_cues') or []
+            pes  = row.get('first_PE_after_sound_cue') or []
+
+            # —— Tone processing (unchanged, baseline relative to cue) ——
+            tz_list, tt_list = [], []
+            for i, cue in enumerate(cues):
+                if len(cues) == 40 and i == 39:
+                    continue
+
+                mask = (ts >= cue + tone_start) & (ts <= cue + tone_end)
+                if not mask.any():
+                    tz_list.append(np.full_like(tone_axis, np.nan))
+                    tt_list.append(tone_axis.copy())
+                    continue
+
+                rel = ts[mask] - cue
+                sig = zs[mask]
+
+                blm = (rel >= t_bl_start) & (rel <= t_bl_end)
+                base = np.nanmean(sig[blm]) if blm.any() else 0.0
+
+                corr = sig - base
+                tz_list.append(np.interp(tone_axis, rel, corr))
+                tt_list.append(tone_axis.copy())
+
+            tone_z.append(tz_list)
+            tone_t.append(tt_list)
+
+            # —— PE processing (UPDATED: baseline relative to PE) ——
+            pz_list, pt_list = [], []
+            for i, pe in enumerate(pes):
+                if len(cues) == 40 and i == 39:
+                    continue
+
+                if pe is None or (isinstance(pe, float) and np.isnan(pe)):
+                    pz_list.append(np.full_like(pe_axis, np.nan))
+                    pt_list.append(pe_axis.copy())
+                    continue
+
+                # baseline computed from seconds before PE (pe_baseline_window)
+                bmask = (ts >= pe + pe_bl_start) & (ts <= pe + pe_bl_end)
+                base_val = np.nanmean(zs[bmask]) if bmask.any() else 0.0
+
+                mask = (ts >= pe + pe_start) & (ts <= pe + pe_end)
+                if not mask.any():
+                    pz_list.append(np.full_like(pe_axis, np.nan))
+                    pt_list.append(pe_axis.copy())
+                    continue
+
+                rel  = ts[mask] - pe
+                corr = zs[mask] - base_val
+                pz_list.append(np.interp(pe_axis, rel, corr))
+                pt_list.append(pe_axis.copy())
+
+            pe_z.append(pz_list)
+            pe_t.append(pt_list)
+
+        # 5) write back into your DataFrame
+        df['Tone_Time_Axis'] = tone_t
+        df['Tone_Zscore']    = tone_z
+        df['PE_Time_Axis']   = pe_t
+        df['PE_Zscore']      = pe_z
+
+        return df
+
+
+
+
+
     def compute_rtc_da_metrics(
         self,
         bout_duration: float = 4.0,       # still used for PE

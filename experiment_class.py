@@ -442,7 +442,16 @@ class Experiment:
         for idx in range(1, n_subsequent_investigations + 1):
             traces = peth_dict[idx]
             if len(traces) > 0:
-                stacked = np.vstack(traces)
+                min_len = min(len(t) for t in traces)
+                traces_trim = [t[:min_len] for t in traces]
+                stacked = np.vstack(traces_trim)
+
+                # also ensure time_axis matches
+                if time_axis is not None and len(time_axis) != min_len:
+                    time_axis_plot = time_axis[:min_len]
+                else:
+                    time_axis_plot = time_axis
+
                 avg_traces[idx] = np.mean(stacked, axis=0)
                 sem_traces[idx] = np.std(stacked, axis=0) / np.sqrt(stacked.shape[0])
             else:
@@ -620,7 +629,7 @@ class Experiment:
 
 
     '''********************************** DOPAMINE SHIZ **********************************'''
-    def compute_all_da_metrics(self, use_max_length=False, max_bout_duration=10, mode='standard', post_time=15):
+    def compute_all_da_metrics(self, use_max_length=False, max_bout_duration=10, mode='standard', post_time=15, pre_time = 4):
         """
         Iterates over all trials in the experiment and computes DA metrics with the specified windowing options.
         
@@ -640,6 +649,7 @@ class Experiment:
                     use_max_length=use_max_length,
                     max_bout_duration=max_bout_duration,
                     mode=mode,
+                    pre_time = pre_time,
                     post_time=post_time
                 )
             else:
