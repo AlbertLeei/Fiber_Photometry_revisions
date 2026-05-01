@@ -35,6 +35,7 @@ class Trial:
         self.dFF = np.empty(1)
         self.zscore = np.empty(1)
 
+<<<<<<< HEAD
     def _invalidate_processed_outputs(self, clear_fit: bool = True):
         """
         Clear derived outputs that are no longer valid after mutating the
@@ -56,6 +57,8 @@ class Trial:
         self.updated_ISOS = np.asarray(isos, dtype=float)
         self._invalidate_processed_outputs(clear_fit=True)
 
+=======
+>>>>>>> 22ce80f5f1f0cb1b7424ba8f2ef172c6bfd91bb1
 
     '''********************************** TIME REMOVAL **********************************'''
     def remove_initial_LED_artifact(self, t=30):
@@ -68,9 +71,20 @@ class Trial:
         for stream_name in ['DA', 'ISOS']:
             self.streams[stream_name] = self.streams[stream_name][ind:]
         
+<<<<<<< HEAD
         self._set_updated_streams(self.streams['DA'], self.streams['ISOS'])
         self.timestamps = self.timestamps[ind:]
 
+=======
+        self.updated_DA = self.streams['DA']
+        self.updated_ISOS = self.streams['ISOS']
+        self.timestamps = self.timestamps[ind:]
+
+        # Clear dFF and zscore since the raw data has changed
+        self.dFF = None
+        self.zscore = None
+
+>>>>>>> 22ce80f5f1f0cb1b7424ba8f2ef172c6bfd91bb1
 
     def remove_final_data_segment(self, t=30):
         '''
@@ -84,7 +98,16 @@ class Trial:
             self.streams[stream_name] = self.streams[stream_name][:ind+1]
         
         self.timestamps = self.timestamps[:ind+1]
+<<<<<<< HEAD
         self._set_updated_streams(self.streams['DA'], self.streams['ISOS'])
+=======
+        self.updated_DA = self.streams['DA']
+        self.updated_ISOS = self.streams['ISOS']
+
+        # Clear dFF and zscore since the raw data has changed
+        self.dFF = None
+        self.zscore = None
+>>>>>>> 22ce80f5f1f0cb1b7424ba8f2ef172c6bfd91bb1
 
 
     def remove_time_segment(self, start_time, end_time):
@@ -103,10 +126,17 @@ class Trial:
         self.streams['DA'] = np.concatenate([self.streams['DA'][:start_idx], self.streams['DA'][end_idx:]])
         self.streams['ISOS'] = np.concatenate([self.streams['ISOS'][:start_idx], self.streams['ISOS'][end_idx:]])
 
+<<<<<<< HEAD
         if hasattr(self, 'updated_DA') and hasattr(self, 'updated_ISOS'):
             updated_da = np.concatenate([self.updated_DA[:start_idx], self.updated_DA[end_idx:]])
             updated_isos = np.concatenate([self.updated_ISOS[:start_idx], self.updated_ISOS[end_idx:]])
             self._set_updated_streams(updated_da, updated_isos)
+=======
+        if hasattr(self, 'updated_DA'):
+            self.updated_DA = np.concatenate([self.updated_DA[:start_idx], self.updated_DA[end_idx:]])
+        if hasattr(self, 'updated_ISOS'):
+            self.updated_ISOS = np.concatenate([self.updated_ISOS[:start_idx], self.updated_ISOS[end_idx:]])
+>>>>>>> 22ce80f5f1f0cb1b7424ba8f2ef172c6bfd91bb1
 
         print(f"Removed time segment from {start_time}s to {end_time}s.")
 
@@ -191,13 +221,26 @@ class Trial:
         self.streams['ISOS'] = iso_ds
 
         # reset “updated” traces to match
+<<<<<<< HEAD
         self._set_updated_streams(da_ds.copy(), iso_ds.copy())
+=======
+        self.updated_DA   = da_ds.copy()
+        self.updated_ISOS = iso_ds.copy()
+>>>>>>> 22ce80f5f1f0cb1b7424ba8f2ef172c6bfd91bb1
 
         # rebuild timestamps (preserving start time)
         t0 = self.timestamps[0]
         n  = len(da_ds)
         self.timestamps = t0 + np.arange(n) / self.fs
 
+<<<<<<< HEAD
+=======
+        # clear any downstream computations
+        self.dFF    = None
+        self.zscore = None
+
+    
+>>>>>>> 22ce80f5f1f0cb1b7424ba8f2ef172c6bfd91bb1
     '''********************************** FILTERING **********************************'''
     def lowpass_filter(self, cutoff_hz: float = 3.0):
             """
@@ -206,9 +249,14 @@ class Trial:
             # design a 2nd-order low-pass (digital) at cutoff_hz
             b, a = butter(2, cutoff_hz, btype='low', fs=self.fs)
             # zero-phase filter
+<<<<<<< HEAD
             da_lp = filtfilt(b, a, self.updated_DA, padtype='even')
             isos_lp = filtfilt(b, a, self.updated_ISOS, padtype='even')
             self._set_updated_streams(da_lp, isos_lp)
+=======
+            self.updated_DA   = filtfilt(b, a, self.updated_DA,   padtype='even')
+            self.updated_ISOS = filtfilt(b, a, self.updated_ISOS, padtype='even')
+>>>>>>> 22ce80f5f1f0cb1b7424ba8f2ef172c6bfd91bb1
             # Store the lowpass-filtered results for visualization
             self.updated_DA_after_lowpass = self.updated_DA.copy()
             self.updated_ISOS_after_lowpass = self.updated_ISOS.copy()
@@ -228,6 +276,7 @@ class Trial:
 
         # Apply zero-phase filtering to avoid phase distortion
         self.dFF = filtfilt(b, a, self.dFF, padtype='even')
+<<<<<<< HEAD
         self._invalidate_processed_outputs(clear_fit=False)
 
     def baseline_drift_highpass(self, cutoff=0.001, preserve_mean=False):
@@ -256,6 +305,8 @@ class Trial:
             hp_ISOS = hp_ISOS + mu_ISOS
 
         self._set_updated_streams(hp_DA, hp_ISOS)
+=======
+>>>>>>> 22ce80f5f1f0cb1b7424ba8f2ef172c6bfd91bb1
 
 
     def baseline_drift_highpass_recentered(self, cutoff=0.001):
@@ -264,7 +315,24 @@ class Trial:
         DC-level by adding back the mean afterwards.
         Call this after any smoothing, on updated_DA/updated_ISOS.
         """
+<<<<<<< HEAD
         self.baseline_drift_highpass(cutoff=cutoff, preserve_mean=True)
+=======
+        # 1) remember pre-filter mean
+        mu_DA   = np.mean(self.updated_DA)
+        mu_ISOS = np.mean(self.updated_ISOS)
+
+        # 2) design filter
+        b, a = butter(N=2, Wn=cutoff, btype='high', fs=self.fs)
+
+        # 3) filter
+        hp_DA   = filtfilt(b, a, self.updated_DA,   padtype='even')
+        hp_ISOS = filtfilt(b, a, self.updated_ISOS, padtype='even')
+
+        # 4) add back original mean
+        self.updated_DA   = hp_DA   + mu_DA
+        self.updated_ISOS = hp_ISOS + mu_ISOS
+>>>>>>> 22ce80f5f1f0cb1b7424ba8f2ef172c6bfd91bb1
 
 
     def _double_exponential(t, c, A_fast, A_slow, tau_slow, tau_mul):
@@ -321,8 +389,11 @@ class Trial:
 
             results[ch] = popt
 
+<<<<<<< HEAD
         self._invalidate_processed_outputs(clear_fit=True)
 
+=======
+>>>>>>> 22ce80f5f1f0cb1b7424ba8f2ef172c6bfd91bb1
         return results
 
 
@@ -353,6 +424,7 @@ class Trial:
         # optional: log the fit
         # print(f"IRLS fit: DA ≃ {b1:.4f}·ISOS + {b0:.4f}")
 
+<<<<<<< HEAD
     def motion_correction_align_channels_OLS(self):
         """
         Fit an ordinary least squares regression of DA on ISOS and store the
@@ -368,6 +440,8 @@ class Trial:
         b0, b1 = res.params
         self.isosbestic_fitted = b0 + b1 * x
 
+=======
+>>>>>>> 22ce80f5f1f0cb1b7424ba8f2ef172c6bfd91bb1
 
 
     '''********************************** NORMALIZATION METHODS **********************************'''

@@ -157,6 +157,7 @@ class RTC(Experiment):
             trial.rtc_events['port entries'].offset_times = trial.rtc_events['port entries'].offset[1:]
             
             valid_sound_cues = [t for t in trial.rtc_events['sound cues'].onset_times if t >= 200]
+<<<<<<< HEAD
 			# Remove the last sound cues which induced by stop of the recordings
             if trial_folder == 'nn1-250203-085508' or trial_folder == 'nn3-250203-085508' or \
             trial_folder == 'pp1-250204-095252' or trial_folder == 'pp2-250204-095252':
@@ -241,6 +242,11 @@ class RTC(Experiment):
         
         return filtered_cues
 
+=======
+            trial.rtc_events['sound cues'].onset_times = valid_sound_cues
+
+
+>>>>>>> 22ce80f5f1f0cb1b7424ba8f2ef172c6bfd91bb1
 
     def remove_specified_subjects(self):
         """
@@ -1160,6 +1166,7 @@ class RTC(Experiment):
         return self.spont_peaks
 
 
+<<<<<<< HEAD
     def plot_trial_by_name(self, trial_name, figsize=(14, 12), save_path=None, 
                            start_time=None, end_time=None):
         """
@@ -1209,6 +1216,8 @@ class RTC(Experiment):
                                         save_path=save_path, trial_name=trial_name,
                                         start_time=start_time, end_time=end_time)
 
+=======
+>>>>>>> 22ce80f5f1f0cb1b7424ba8f2ef172c6bfd91bb1
     def plot_processing_progression(self, trial, sound_cues=None, figsize=(14, 12), save_path=None, trial_name=None,
                                    start_time=None, end_time=None):
         """
@@ -1439,6 +1448,7 @@ class RTC(Experiment):
             axes[5].set_title('6. Z-Score (Not Yet Computed)', fontsize=11, fontweight='bold')
         plot_sound_cues(axes[5], sound_cues)
         
+<<<<<<< HEAD
         # Generate x-ticks every 10 seconds for all subplots
         xmin, xmax = axes[0].get_xlim()
         xticks = np.arange(np.ceil(xmin / 10) * 10, xmax + 10, 10)
@@ -1447,6 +1457,8 @@ class RTC(Experiment):
             ax.tick_params(axis='x', labelbottom=True, labelrotation=90)
             ax.set_xticklabels([f"{int(t)}" for t in xticks], fontsize=8)
         
+=======
+>>>>>>> 22ce80f5f1f0cb1b7424ba8f2ef172c6bfd91bb1
         # Add overall title
         fig.suptitle(trial_name, fontsize=14, fontweight='bold', y=0.995)
         
