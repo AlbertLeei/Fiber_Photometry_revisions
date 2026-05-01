@@ -1,7 +1,0 @@
-group_a,group_b,n_a,n_b,statistic,p_value
-Short_Term-1,Short_Term-2,14,14,122.0,0.28024439903245457
-Short_Term-1,Novel-1,14,14,120.0,0.3232138110799865
-Short_Term-1,Long_Term-1,14,13,106.0,0.48166365977248615
-Short_Term-2,Novel-1,14,14,86.0,0.5972229027923643
-Short_Term-2,Long_Term-1,14,13,83.0,0.7158981921466268
-Novel-1,Long_Term-1,14,13,85.0,0.7895508747416392
