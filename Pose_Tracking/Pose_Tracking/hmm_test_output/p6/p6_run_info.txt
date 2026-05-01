@@ -1,0 +1,5 @@
+mouse_identity=p6
+n_rows=15140
+n_states=2
+baseline_state=0
+log_likelihood=-350400.2886481966

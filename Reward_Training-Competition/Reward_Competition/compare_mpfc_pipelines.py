@@ -21,8 +21,10 @@ class PipelineConfig:
     description: str
     apply_lowpass: bool = True
     apply_pre_irls_highpass: bool = False
+    pre_irls_highpass_preserve_mean: bool = True
     apply_post_dff_highpass: bool = False
     apply_double_exp: bool = False
+    regression_method: str = "irls"
 
 
 PIPELINES = [
@@ -31,28 +33,69 @@ PIPELINES = [
         description="Low-pass -> high-pass on channels -> IRLS -> dF/F",
         apply_lowpass=True,
         apply_pre_irls_highpass=True,
+        pre_irls_highpass_preserve_mean=True,
+        regression_method="irls",
+    ),
+    PipelineConfig(
+        name="current_default_ols",
+        description="Low-pass -> high-pass on channels -> OLS -> dF/F",
+        apply_lowpass=True,
+        apply_pre_irls_highpass=True,
+        pre_irls_highpass_preserve_mean=True,
+        regression_method="ols",
+    ),
+    PipelineConfig(
+        name="highpass_centered_pre_irls",
+        description="Low-pass -> high-pass on channels without mean restoration -> IRLS -> dF/F",
+        apply_lowpass=True,
+        apply_pre_irls_highpass=True,
+        pre_irls_highpass_preserve_mean=False,
+        regression_method="irls",
     ),
     PipelineConfig(
         name="no_highpass",
         description="Low-pass -> IRLS -> dF/F",
         apply_lowpass=True,
+        regression_method="irls",
+    ),
+    PipelineConfig(
+        name="no_highpass_ols",
+        description="Low-pass -> OLS -> dF/F",
+        apply_lowpass=True,
+        regression_method="ols",
     ),
     PipelineConfig(
         name="highpass_after_dff",
         description="Low-pass -> IRLS -> dF/F -> high-pass on dF/F",
         apply_lowpass=True,
         apply_post_dff_highpass=True,
+        regression_method="irls",
     ),
     PipelineConfig(
         name="double_exp_detrend",
         description="Low-pass -> double-exponential detrend -> IRLS -> dF/F",
         apply_lowpass=True,
         apply_double_exp=True,
+        regression_method="irls",
+    ),
+    PipelineConfig(
+        name="double_exp_detrend_ols",
+        description="Low-pass -> double-exponential detrend -> OLS -> dF/F",
+        apply_lowpass=True,
+        apply_double_exp=True,
+        regression_method="ols",
     ),
     PipelineConfig(
         name="raw_irls_only",
         description="No low-pass, no high-pass -> IRLS -> dF/F",
         apply_lowpass=False,
+        regression_method="irls",
+    ),
+    PipelineConfig(
+        name="raw_ols_only",
+        description="No low-pass, no high-pass -> OLS -> dF/F",
+        apply_lowpass=False,
+        regression_method="ols",
     ),
 ]
 
@@ -62,6 +105,8 @@ IRLS_ANALYSIS_CONFIG = PipelineConfig(
     description="Low-pass -> high-pass on channels -> IRLS -> dF/F",
     apply_lowpass=True,
     apply_pre_irls_highpass=True,
+    pre_irls_highpass_preserve_mean=True,
+    regression_method="irls",
 )
 
 
@@ -147,12 +192,21 @@ def run_pipeline(
     if config.apply_double_exp:
         trial.basline_drift_double_exponential()
     elif config.apply_pre_irls_highpass:
-        trial.baseline_drift_highpass_recentered(cutoff=highpass_cutoff)
+        trial.baseline_drift_highpass(
+            cutoff=highpass_cutoff,
+            preserve_mean=config.pre_irls_highpass_preserve_mean,
+        )
 
     pre_irls_da = trial.updated_DA.copy()
     pre_irls_isos = trial.updated_ISOS.copy()
 
-    trial.motion_correction_align_channels_IRLS(IRLS_constant=irls_constant)
+    if config.regression_method == "irls":
+        trial.motion_correction_align_channels_IRLS(IRLS_constant=irls_constant)
+    elif config.regression_method == "ols":
+        trial.motion_correction_align_channels_OLS()
+    else:
+        raise ValueError(f"Unsupported regression_method: {config.regression_method}")
+
     trial.compute_dFF()
 
     if config.apply_post_dff_highpass:
@@ -173,6 +227,7 @@ def run_pipeline(
         "metrics": {
             "pipeline": config.name,
             "description": config.description,
+            "regression_method": config.regression_method,
             "da_fit_corr": safe_corr(trial.updated_DA, trial.isosbestic_fitted),
             "residual_mad": mad(residual),
             "residual_mean_abs": float(np.nanmean(np.abs(residual))),

@@ -1,0 +1,5 @@
+mouse_identity=p8
+n_rows=15128
+n_states=2
+baseline_state=1
+log_likelihood=-350251.30212625524

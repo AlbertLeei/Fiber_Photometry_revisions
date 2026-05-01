@@ -218,7 +218,11 @@ class SleapExperiment(Experiment):
     #     return all_df
     
     def save_sleap_features(self, out_csv: str):
-        """Dump the concatenated SLEAP + DA feature table."""
+        """Dump the concatenated SLEAP + DA feature table for all valid frames."""
+        self.save_valid_features(out_csv)
+
+    def save_valid_features(self, out_csv: str):
+        """Save all extracted valid-frame pose features, whether behavior is labeled or not."""
         self.all_sleap_features.to_csv(out_csv, index=False)
 
 

@@ -1,0 +1,5 @@
+mouse_identity=n5
+n_rows=15058
+n_states=4
+baseline_state=1
+log_likelihood=-288053.7192240749
