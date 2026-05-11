@@ -208,6 +208,38 @@ class Experiment:
                 print(f"Warning: No CSV found for {trial_name} in {self.behavior_folder_path}. Skipping.")
 
 
+
+    """************************************NON-REWARD INDUCED COMPETITION************************************"""
+    
+    def group_extract_manual_annotations2(self, bout_definitions, first_only=True, pre_window=2.5):
+
+        for trial_name, trial in self.trials.items():
+
+            csv_path = os.path.join(self.behavior_folder_path, f"{trial_name}.csv")
+
+            if os.path.exists(csv_path):
+                print(csv_path)
+                trial.extract_bouts_and_behaviors2(
+                    csv_path,
+                    bout_definitions,
+                    first_only=first_only, 
+                    pre_window=pre_window
+                )
+
+                trial.combine_consecutive_behaviors2(
+                    behavior_name="all",
+                    bout_time_threshold=1
+                )
+
+                trial.remove_short_behaviors(
+                    behavior_name="all",
+                    min_duration=1
+                )
+
+            else:
+                print(f"Warning: No CSV found for {trial_name}. Skipping.")
+
+
     '''********************************** PLOTTING **********************************'''
     def plot_all_traces(
         experiment,

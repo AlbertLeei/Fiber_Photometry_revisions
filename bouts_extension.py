@@ -94,6 +94,57 @@ def create_metadata_dataframe(trial_data, behavior="Investigation", desired_bout
     
     return final_df
 
+def create_metadata_dataframe2(trial_data, behavior=None, desired_bouts=None):
+
+    metadata_rows = []
+
+    for subject_id, df in trial_data.items():
+        
+        if df is None:
+            continue
+
+        # If no Bout column exists, treat everything as one bout
+        if "Bout" in df.columns:
+            bouts = desired_bouts if desired_bouts is not None else df["Bout"].unique()
+        else:
+            bouts = ["all"]
+
+        for bout in bouts:
+
+            if "Bout" in df.columns:
+                df_bout = df[df["Bout"] == bout]
+            else:
+                df_bout = df  # everything is one bout
+
+            # Filter behavior if specified
+            if behavior is not None and "Behavior" in df.columns:
+                df_behavior = df_bout[df_bout["Behavior"] == behavior]
+            else:
+                df_behavior = df_bout
+
+            if df_behavior.empty:
+                total_time = 0
+                avg_duration = 0
+            else:
+                # Handle both naming conventions
+                if "Duration (s)" in df_behavior.columns:
+                    durations = df_behavior["Duration (s)"]
+                else:
+                    durations = df_behavior["duration"]
+
+                total_time = durations.sum()
+                count = durations.count()
+                avg_duration = total_time / count if count > 0 else 0
+
+            metadata_rows.append({
+                "Subject": subject_id,
+                "Bout": bout,
+                "Behavior": behavior if behavior else "all",
+                "Total Investigation Time": total_time,
+                "Average Bout Duration": avg_duration
+            })
+
+    return pd.DataFrame(metadata_rows)
 
 def create_da_metrics_dataframe(trial_data, behavior="Investigation", desired_bouts=None):
     """

@@ -540,7 +540,7 @@ class Trial:
             return  # No behaviors to process
 
         df = self.behaviors.copy()  # Work on a copy to avoid modifying during iteration
-
+        
         # Select behaviors to process
         if behavior_name != 'all':
             df = df[df['Behavior'] == behavior_name]
@@ -552,9 +552,8 @@ class Trial:
         combined_rows = []
         
         # Iterate through groups of behaviors
-        for (bout, behavior), group in df.groupby(['Bout', 'Behavior']):
+        for (bout, behavior), group in df.groupby(['Bout', 'Behavior']):            
             group = group.sort_values('Event_Start').reset_index(drop=True)
-            
             # Initialize first behavior
             current_start = group.loc[0, 'Event_Start']
             current_end = group.loc[0, 'Event_End']
@@ -573,7 +572,7 @@ class Trial:
                         'Behavior': behavior,
                         'Event_Start': current_start,
                         'Event_End': current_end,
-                        'Duration (s)': current_end - current_start
+                        'Duration (s)': current_end - current_start,
                     })
                     # Reset to next behavior
                     current_start = next_start
@@ -585,7 +584,7 @@ class Trial:
                 'Behavior': behavior,
                 'Event_Start': current_start,
                 'Event_End': current_end,
-                'Duration (s)': current_end - current_start
+                'Duration (s)': current_end - current_start,
             })
 
         # Convert back to DataFrame and update
@@ -610,6 +609,8 @@ class Trial:
 
         # Apply duration filter
         df = df[df['Duration (s)'] >= min_duration]
+
+        print(len(df))
 
         # Update self.behaviors
         self.behaviors = df.reset_index(drop=True)
@@ -819,7 +820,10 @@ class Trial:
             return
 
         # Calculate a common time axis based on the average sampling interval.
-        dt = np.mean(np.diff(self.timestamps))
+        # dt = np.mean(np.diff(self.timestamps))
+
+        # Absolute dt
+        dt = 0.01
         common_time_axis = np.arange(-pre_time, post_time, dt)
 
         # Lists to hold the computed axes and processed signals for each event.
@@ -1034,7 +1038,11 @@ class Trial:
             return
 
         # Determine the average sampling interval from the timestamps.
-        dt = np.mean(np.diff(self.timestamps))
+        # dt = np.mean(np.diff(self.timestamps))
+        
+        # Absolute dt
+        dt = 0.01
+
         # Create a common time axis from -pre_time to +post_time relative to event onset.
         common_time_axis = np.arange(-pre_time, post_time, dt)
         
@@ -1229,3 +1237,168 @@ class Trial:
             # print(f"Figure saved to {save_path}")
         
         plt.show()
+
+    """****************************NON-REWARD INDUCED COMPETITION*****************************"""
+    def extract_bouts_and_behaviors2(self, csv_path, bout_definitions, first_only=True, pre_window=2.5):
+        """
+        Extracts non-reward induced competition bouts by extracting behaviors based on bout_definitions and removing
+        bouts that overlap with tone times.
+
+        Also removes behaviors (competition bouts) that have an competition bout 2.5 seconds before onset.
+        """
+
+        df = pd.read_csv(csv_path)
+        df.columns = [col.strip() for col in df.columns]
+        
+        cue_epoc = self.rtc_events.get("sound cues", None)
+
+        if isinstance(cue_epoc, (list, np.ndarray)):
+            cue_epoc = cue_epoc[0]
+
+        cue_onsets = np.asarray(cue_epoc.onset_times)
+        cue_offsets = np.asarray(cue_epoc.offset_times)
+        cue_offsets = np.nan_to_num(cue_offsets, posinf=np.inf)
+            
+        all_starts_global = df["Start (s)"].values
+
+        self.bouts = {}
+        
+        for bout_def in bout_definitions:
+            prefix = bout_def["prefix"]
+            behavior = bout_def["behavior"]
+            subject = bout_def.get("subject", None)
+
+            subset = df[df["Behavior"] == bout_def["behavior"]]
+            
+
+            if subject is not None:
+                subset = subset[subset["Subject"] == subject]
+
+            subset = subset.sort_values("Start (s)")
+            # debug line
+            print("Initial # bouts:", len(subset))
+            starts = subset["Start (s)"].values
+            ends = subset["Stop (s)"].values
+            
+            # remove behaviors with ITI of 2.5 seconds pre-onset
+            mask = np.ones(len(subset), dtype=bool)
+            
+            for i, t in enumerate(starts):
+                recent_event = np.any(
+                    (all_starts_global >= t - pre_window) &
+                    (all_starts_global < t)
+                )
+                mask[i] = mask[i] & (~recent_event)
+            
+            subset = subset[mask]
+            
+            # debug line
+            print("After pre-onset filter:", len(subset))
+
+            starts = subset["Start (s)"].values
+            ends = subset["Stop (s)"].values
+            
+            mask = np.ones(len(subset), dtype=bool)
+
+            # remove cue-overlapping behavior
+            for c_start, c_end in zip(cue_onsets, cue_offsets):
+                overlap = ~((ends < c_start) | (starts > c_end + 10))
+                mask &= ~overlap
+            subset = subset[mask]
+
+            # debug line
+            print("After cue filter:", len(subset))
+
+            # Optionally keep only first bout
+            if first_only and len(subset) > 0:
+                subset = subset.iloc[[0]]
+
+            # Build standardized DataFrame
+            cols = ["Bout", "Behavior", "Subject",
+                    "Event_Start", "Event_End", "Duration (s)"]
+
+            if subset.empty:
+                bout_df = pd.DataFrame(columns=cols)
+
+            else:
+                bout_df = pd.DataFrame({
+                    "Bout": prefix,
+                    "Behavior": behavior,
+                    "Subject": subset["Subject"].values,
+                    "Event_Start": subset["Start (s)"].values,
+                    "Event_End": subset["Stop (s)"].values,
+                    "Duration (s)": subset["Duration (s)"].values
+                })
+
+            self.bouts[prefix] = bout_df
+
+        if len(self.bouts) > 0:
+            self.behaviors = pd.concat(self.bouts.values(), ignore_index=True)
+        else:
+            self.behaviors = pd.DataFrame()
+
+    def combine_consecutive_behaviors2(self, behavior_name='all', bout_time_threshold=1):
+        """
+        Combines consecutive behavior events if they occur within a specified time threshold
+        and updates the self.behaviors DataFrame. Separates based on who initiated behaviors
+
+        Parameters:
+        - behavior_name (str): The behavior type to process. If 'all', process all behaviors.
+        - bout_time_threshold (float): Maximum time (in seconds) between consecutive events to merge them.
+        """
+        if self.behaviors is None or self.behaviors.empty:
+            return
+
+        df = self.behaviors.copy()
+
+        if behavior_name != 'all':
+            df = df[df['Behavior'] == behavior_name]
+
+        # sort properly
+        df = df.sort_values(by=['Bout', 'Behavior', 'Subject', 'Event_Start']).reset_index(drop=True)
+
+        combined_rows = []
+
+        # group by initiator correctly
+        for (bout, behavior, initiator), group in df.groupby(['Bout', 'Behavior', 'Subject']):
+
+            group = group.sort_values('Event_Start').reset_index(drop=True)
+
+            if group.empty:
+                continue
+
+            current_start = group.loc[0, 'Event_Start']
+            current_end = group.loc[0, 'Event_End']
+
+            for i in range(1, len(group)):
+                next_start = group.loc[i, 'Event_Start']
+                next_end = group.loc[i, 'Event_End']
+
+                if next_start - current_end <= bout_time_threshold:
+                    current_end = next_end
+                else:
+                    combined_rows.append({
+                        'Bout': bout,
+                        'Behavior': behavior,
+                        'Event_Start': current_start,
+                        'Event_End': current_end,
+                        'Duration (s)': current_end - current_start,
+                        'Initiators': initiator
+                    })
+
+                    current_start = next_start
+                    current_end = next_end
+
+            # last segment
+            combined_rows.append({
+                'Bout': bout,
+                'Behavior': behavior,
+                'Event_Start': current_start,
+                'Event_End': current_end,
+                'Duration (s)': current_end - current_start,
+                'Initiators': initiator
+            })
+
+        self.behaviors = pd.DataFrame(combined_rows)
+
+        print("After combining # bouts:", len(self.behaviors))
