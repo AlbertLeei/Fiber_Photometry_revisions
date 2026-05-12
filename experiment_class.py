@@ -679,7 +679,6 @@ class Experiment:
 
 
 
-
     def compute_all_event_induced_DA(self, pre_time=4, post_time=15):
         """
         Iterates over all trials in the experiment and computes the event-induced DA signals

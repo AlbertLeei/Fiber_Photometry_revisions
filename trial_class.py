@@ -873,7 +873,7 @@ class Trial:
                         use_max_length=False, 
                         max_bout_duration=30, 
                         mode='standard', 
-                        pre_time=4, 
+                        pre_time=5, 
                         post_time=15):
         """
         Computes DA metrics for each behavior event (row) in self.behaviors.
@@ -908,7 +908,7 @@ class Trial:
         - pre_time (float): (For EI mode) Seconds before event onset used in computing the relative DA.
         - post_time (float): (For EI mode) Seconds after event onset used in computing the relative DA.
         """
-        if self.behaviors.empty:
+        if self.behaviors is None or self.behaviors.empty:
             return
 
         # Ensure metric columns exist.
