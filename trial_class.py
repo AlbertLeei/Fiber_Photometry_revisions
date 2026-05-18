@@ -1239,7 +1239,7 @@ class Trial:
         plt.show()
 
     """****************************NON-REWARD INDUCED COMPETITION*****************************"""
-    def extract_bouts_and_behaviors2(self, csv_path, bout_definitions, first_only=True, pre_window=2.5):
+    def extract_bouts_and_behaviors2(self, csv_path, bout_definitions, first_only=True, pre_window=2.5, cue=True):
         """
         Extracts non-reward induced competition bouts by extracting behaviors based on bout_definitions and removing
         bouts that overlap with tone times.
@@ -1276,7 +1276,7 @@ class Trial:
 
             subset = subset.sort_values("Start (s)")
             # debug line
-            print("Initial # bouts:", len(subset))
+            # print("Initial # bouts:", len(subset))
             starts = subset["Start (s)"].values
             ends = subset["Stop (s)"].values
             
@@ -1293,21 +1293,37 @@ class Trial:
             subset = subset[mask]
             
             # debug line
-            print("After pre-onset filter:", len(subset))
+            # print("After pre-onset filter:", len(subset))
 
             starts = subset["Start (s)"].values
             ends = subset["Stop (s)"].values
             
             mask = np.ones(len(subset), dtype=bool)
 
-            # remove cue-overlapping behavior
-            for c_start, c_end in zip(cue_onsets, cue_offsets):
-                overlap = ~((ends < c_start) | (starts > c_end + 10))
-                mask &= ~overlap
+            # remove or filter for cue-overlapping behavior
+            if cue is True:
+                mask = np.zeros(len(subset), dtype=bool)
+                for c_start, c_end in zip(cue_onsets, cue_offsets):
+                    # overlap condition
+                    overlap = ~((ends < c_start) | (starts > c_end + 10))
+
+                    # behavior starts near cue onset
+                    during_cue = (
+                        (starts >= c_start) & 
+                        (starts <= c_start + 4)     # 4 s after cue
+                    )
+
+                    # keep only bouts satisfying both
+                    mask |= (overlap & during_cue)
+
+            else:            
+                for c_start, c_end in zip(cue_onsets, cue_offsets):
+                    overlap = ~((ends < c_start) | (starts > c_end + 10))
+                    mask &= ~overlap
             subset = subset[mask]
 
             # debug line
-            print("After cue filter:", len(subset))
+            # print("After cue filter:", len(subset))
 
             # Optionally keep only first bout
             if first_only and len(subset) > 0:
@@ -1336,6 +1352,7 @@ class Trial:
             self.behaviors = pd.concat(self.bouts.values(), ignore_index=True)
         else:
             self.behaviors = pd.DataFrame()
+
 
     def combine_consecutive_behaviors2(self, behavior_name='all', bout_time_threshold=1):
         """
@@ -1400,5 +1417,5 @@ class Trial:
             })
 
         self.behaviors = pd.DataFrame(combined_rows)
-
+        # debug line
         print("After combining # bouts:", len(self.behaviors))

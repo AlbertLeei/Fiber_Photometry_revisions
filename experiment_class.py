@@ -211,8 +211,13 @@ class Experiment:
 
     """************************************NON-REWARD INDUCED COMPETITION************************************"""
     
-    def group_extract_manual_annotations2(self, bout_definitions, first_only=True, pre_window=2.5):
-
+    def group_extract_manual_annotations2(self, bout_definitions, first_only=True, pre_window=2.5, min_duration=0.5, cue=True):
+        """
+        Extracts bout information for non-reward induced competition BORIS, separating who initiated behavior
+        combining consecutive behaviors under a certain time threshold and removes behaviors shorter than a certain threshold
+        Also removes bout events around tone times.
+        Cue refers to if you want to filter for or remove all behaviors during cue times.
+        """
         for trial_name, trial in self.trials.items():
 
             csv_path = os.path.join(self.behavior_folder_path, f"{trial_name}.csv")
@@ -223,12 +228,36 @@ class Experiment:
                     csv_path,
                     bout_definitions,
                     first_only=first_only, 
-                    pre_window=pre_window
+                    pre_window=pre_window,
+                    cue=cue
                 )
 
                 trial.combine_consecutive_behaviors2(
                     behavior_name="all",
                     bout_time_threshold=1
+                )
+
+                trial.remove_short_behaviors(
+                    behavior_name="all",
+                    min_duration=min_duration
+                )
+
+            else:
+                print(f"Warning: No CSV found for {trial_name}. Skipping.")
+
+    def group_extract_reward_competition_annotations(self, bout_definitions, first_only= False, pre_window=2.5):
+        
+        
+        for trial_name, trial in self.trials.items():
+            csv_path = os.path.join(self.behavior_folder_path, f"{trial_name}.csv")
+
+            if os.path.exists(csv_path):
+                print(csv_path)
+                trial.extract_bouts_and_behaviors2(
+                    csv_path,
+                    bout_definitions,
+                    first_only=first_only, 
+                    pre_window=pre_window
                 )
 
                 trial.remove_short_behaviors(

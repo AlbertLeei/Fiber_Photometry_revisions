@@ -569,6 +569,125 @@ class RTC(Experiment):
         # return for chaining if you like
         return df
 
+
+    def compute_EI_DA2(self,
+                    tone_window=(-4, 10),
+                    baseline_window=(-4, 0)
+                ):
+        """
+        Computes cue-aligned DA traces per trial.
+
+        Stores results directly inside each trial:
+            trial.Tone_Time_Axis
+            trial.Tone_Zscore
+        """
+
+        import numpy as np
+
+        # ---------------------------------------------------
+        # FIND GLOBAL DT
+        # ---------------------------------------------------
+        min_dt = np.inf
+
+        for trial_name, trial in self.trials.items():
+
+            if not hasattr(trial, "timestamps"):
+                continue
+
+            ts = np.asarray(trial.timestamps)
+
+            if len(ts) < 2:
+                continue
+
+            dt = np.diff(ts)
+            dt = dt[np.isfinite(dt)]
+
+            if len(dt) == 0:
+                continue
+
+            min_dt = min(min_dt, np.min(dt))
+
+        if not np.isfinite(min_dt):
+            raise RuntimeError("No valid timestamps found")
+
+        print(f"[compute_EI_DA] dt = {min_dt:.5f}")
+
+        tone_axis = np.arange(
+            tone_window[0],
+            tone_window[1],
+            min_dt
+        )
+
+        bl_start, bl_end = baseline_window
+
+        # ---------------------------------------------------
+        # PROCESS EACH TRIAL
+        # ---------------------------------------------------
+        for trial_name, trial in self.trials.items():
+
+            if not hasattr(trial, "timestamps") or not hasattr(trial, "zscore"):
+                continue
+
+            ts = np.asarray(trial.timestamps)
+            zs = np.asarray(trial.zscore)
+
+            if len(ts) == 0:
+                continue
+
+            # ------------------------------------------------
+            # GET CUES
+            # ------------------------------------------------
+            try:
+                cues = np.asarray(
+                    trial.rtc_events["sound cues"]["onset_times"]
+                )
+            except Exception:
+                cues = np.array([])
+
+            # OPTIONAL: remove first/last cue if needed
+            if len(cues) > 2:
+                cues = cues[1:-1]
+
+            tone_z_all = []
+            tone_t_all = []
+
+            # ------------------------------------------------
+            # LOOP CUES
+            # ------------------------------------------------
+            for cue in cues:
+
+                mask = (
+                    (ts >= cue + tone_window[0]) &
+                    (ts <= cue + tone_window[1])
+                )
+
+                if not np.any(mask):
+                    tone_z_all.append(np.full_like(tone_axis, np.nan))
+                    tone_t_all.append(tone_axis.copy())
+                    continue
+
+                rel_t = ts[mask] - cue
+                sig = zs[mask]
+
+                # baseline
+                bl_mask = (rel_t >= bl_start) & (rel_t <= bl_end)
+
+                baseline = np.nanmean(sig[bl_mask]) if np.any(bl_mask) else 0
+
+                corrected = sig - baseline
+
+                interp = np.interp(tone_axis, rel_t, corrected)
+
+                tone_z_all.append(interp)
+                tone_t_all.append(tone_axis.copy())
+
+            # ------------------------------------------------
+            # STORE INSIDE TRIAL OBJECT (IMPORTANT CHANGE)
+            # ------------------------------------------------
+            trial.Tone_Time_Axis = tone_t_all
+            trial.Tone_Zscore = tone_z_all
+
+
     def compute_rtc_da_metrics(
         self,
         bout_duration: float = 4.0,       # still used for PE
@@ -1441,7 +1560,7 @@ class RTC(Experiment):
         
         # Generate x-ticks every 10 seconds for all subplots
         xmin, xmax = axes[0].get_xlim()
-        xticks = np.arange(np.ceil(xmin / 10) * 10, xmax + 10, 10)
+        xticks = np.arange(np.ceil(xmin / 1) * 1, xmax + 1, 1)
         for ax in axes:
             ax.set_xticks(xticks)
             ax.tick_params(axis='x', labelbottom=True, labelrotation=90)
