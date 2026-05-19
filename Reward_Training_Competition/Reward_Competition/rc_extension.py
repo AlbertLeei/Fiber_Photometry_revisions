@@ -1622,6 +1622,383 @@ class Reward_Competition(RTC):
 
             plt.show()
 
+
+    def find_preceding_cues(self,
+                            cue_key="sound cues",
+                            max_time_diff=4):
+        """
+        Finds the nearest PRECEDING cue for each behavioral bout.
+
+        Only cues occurring BEFORE the bout start are considered.
+
+        Parameters
+        ----------
+        cue_key : str
+            Key inside trial.rtc_events containing cue data.
+
+        max_time_diff : float
+            Maximum allowed delay between cue and bout start.
+            Example:
+                4 means cue must occur within 4 seconds before bout.
+
+        Returns
+        -------
+        None
+
+        Adds columns to trial.behaviors:
+            - Nearest_Cue_Time
+            - Nearest_Cue_ID
+            - Nearest_Cue_Index
+            - Cue_Time_Diff
+        """
+
+        for trial_name, trial in self.trials.items():
+
+            # skip invalid trials
+            if (
+                not hasattr(trial, "behaviors") or
+                trial.behaviors is None or
+                trial.behaviors.empty
+            ):
+                continue
+
+            # extract cue data
+            try:
+
+                cue_times = np.asarray(
+                    trial.rtc_events[cue_key]["onset_times"]
+                )
+
+                cue_ids = np.asarray(
+                    trial.rtc_events[cue_key]["data"]
+                )
+
+            except Exception:
+
+                print(f"{trial_name}: missing cue data")
+                continue
+
+            cue_ids   = cue_ids[1:-1]
+
+            nearest_times   = []
+            nearest_ids     = []
+            nearest_indices = []
+            nearest_diffs   = []
+
+            winlose_labels  = []
+            # loop bouts
+            # ----------------------------------------
+            for _, row in trial.behaviors.iterrows():
+                bout_start = row["Event_Start"]
+                try:
+                    initiator = row["Initiators"]
+                    if initiator == row["Winner"]:
+                        outcome = "Win"
+                    else:
+                        outcome = "Lose"
+
+                except Exception:
+                    outcome = np.nan
+                # ----------------------------------------
+                # preceding cue logic
+                # ----------------------------------------
+                valid_mask = (
+                    (cue_times <= bout_start) &
+                    (bout_start - cue_times <= max_time_diff)
+                )
+
+                valid_indices = np.where(valid_mask)[0]
+
+                if len(valid_indices) == 0:
+
+                    nearest_times.append(np.nan)
+                    nearest_ids.append(np.nan)
+                    nearest_indices.append(np.nan)
+                    nearest_diffs.append(np.nan)
+
+                    winlose_labels.append(outcome)
+
+                    continue
+
+                closest_idx = valid_indices[
+                    np.argmin(
+                        bout_start - cue_times[valid_indices]
+                    )
+                ]
+
+                cue_time = cue_times[closest_idx]
+                cue_id   = cue_ids[closest_idx]
+
+                diff = bout_start - cue_time
+
+                nearest_times.append(float(cue_time))
+                nearest_ids.append(int(cue_id))
+                nearest_indices.append(int(closest_idx))
+                nearest_diffs.append(float(diff))
+
+                winlose_labels.append(outcome)
+
+            # ----------------------------------------
+            # save back into behaviors df
+            # ----------------------------------------
+            trial.behaviors["Nearest_Cue_Time"] = nearest_times
+            trial.behaviors["Nearest_Cue_ID"] = nearest_ids
+            trial.behaviors["Nearest_Cue_Index"] = nearest_indices
+            trial.behaviors["Cue_to_Bout_Latency"] = nearest_diffs
+            trial.behaviors["Outcome"] = winlose_labels
+
+        print("Preceding cue mapping complete.")
+
+
+    def build_event_bank_from_preceding_cues(self,
+                                            cue_window=10):
+        """
+        Builds behavioral event bank:
+        - bout start/end
+        - nearest preceding cue (ONLY before bout start)
+        - cue_id + winner metadata
+
+        DOES NOT store DA traces (those come from da_df).
+        """
+
+        event_bank = {}
+
+        for trial_name, trial in self.trials.items():
+
+            if trial.behaviors is None or trial.behaviors.empty:
+                continue
+
+            event_bank.setdefault(trial_name, {})
+
+            # ---------------------------------------
+            # load cue times + cue ids
+            # ---------------------------------------
+            try:
+                cue_times = np.asarray(trial.rtc_events["sound cues"]["onset_times"])
+                cue_ids   = np.asarray(trial.rtc_events["sound cues"]["data"])
+            except Exception:
+                cue_times = np.array([])
+                cue_ids = np.array([])
+
+            trial_row = self.trials_df[self.trials_df["file name"] == trial_name].iloc[0]
+            winner_array = np.asarray(trial_row["winner_array"])  # or unfiltered version
+
+            # enforce safe pairing
+            print(len(cue_times)) 
+            print(len(cue_ids))
+            cue_ids = cue_ids[1:]
+            
+            # ---------------------------------------
+            # loop initiators
+            # ---------------------------------------
+            for initiator in trial.behaviors["Initiators"].dropna().unique():
+
+                sub = trial.behaviors[trial.behaviors["Initiators"] == initiator]
+
+                traces = []
+
+                for _, row in sub.iterrows():
+
+                    start = row["Event_Start"]
+                    end   = row["Event_End"]
+
+                    # -----------------------------------
+                    # ONLY preceding cue (not full window)
+                    # -----------------------------------
+                    valid = cue_times < start
+                    if not np.any(valid):
+                        continue
+
+                    idx = np.where(valid)[0][-1]  # nearest preceding cue
+
+                    cue_time = cue_times[idx]
+                    cue_id   = cue_ids[idx]
+
+
+                    traces.append({
+                        "bout_start": start,
+                        "bout_end": end,
+                        "cue_time": cue_time,
+                        "cue_id": cue_id,
+                        "initiator": initiator,
+                        "winner": winner_array[idx]
+                    })
+
+                event_bank[trial_name][initiator] = traces
+                print(traces)
+        self.event_traces = event_bank
+        return event_bank
+
+    def plot_event_bank_by_trial2(self,
+                              initiator=None,
+                              figsize=(12, 5),
+                              alpha=1,
+                              window=(-5, 5)):
+        """
+        DA-native plotting:
+        - uses da_df as ground truth
+        - event_bank only provides metadata
+        """
+
+        if not hasattr(self, "event_traces"):
+            raise ValueError("Run build_event_bank_from_preceding_cues first")
+
+        if not hasattr(self, "da_df"):
+            raise ValueError("Run compute_EI_DA first")
+
+        event_bank = self.event_traces
+        df = self.da_df
+
+        REGION_COLOR = {
+                "NAc": "#15616F",
+                "PFC": "#FFAF00"
+            }
+
+        for trial_name, initiator_dict in event_bank.items():
+
+            color = REGION_COLOR["NAc"] if trial_name.startswith("n") else REGION_COLOR["PFC"]
+
+            # ---------------------------------------
+            # BUILD FLAT LIST SAFELY
+            # ---------------------------------------
+            all_bouts = []
+
+            for init, bouts in initiator_dict.items():
+
+                if initiator is not None and init != initiator:
+                    continue
+
+                # IMPORTANT: skip empty lists
+                if bouts is None or len(bouts) == 0:
+                    continue
+
+                for bout in bouts:
+                    all_bouts.append((init, bout))
+
+            n = len(all_bouts)
+
+            # ---------------------------------------
+            # 🚨 CRITICAL FIX: prevent crash
+            # ---------------------------------------
+            if n == 0:
+                print(f"[SKIP] No valid bouts for {trial_name}, initiator={initiator}")
+                continue
+
+            per_plot_height = 3
+            max_height = 18
+            fig_height = min(per_plot_height * n, max_height)
+
+            fig, axes = plt.subplots(
+                n,
+                1,
+                figsize=(figsize[0], fig_height),
+                sharex=True
+            )
+
+            axes = np.atleast_1d(axes)
+
+            ax_i = 0
+
+            # ---------------------------------------
+            # loop initiators
+            # ---------------------------------------
+            for init, traces in initiator_dict.items():
+
+                if initiator is not None and init != initiator:
+                    continue
+
+                for trace in traces:
+
+                    ax = axes[ax_i]
+                    ax_i += 1
+
+                    cue_time = trace["cue_time"]
+                    start    = trace["bout_start"]
+                    end      = trace["bout_end"]
+
+                    winner   = trace.get("winner", "NA")
+                    cue_id   = trace.get("cue_id", "NA")
+
+                    # -----------------------------------
+                    # FIND DA ROW FOR THIS TRIAL
+                    # -----------------------------------
+                    trial_df = df[df["file name"] == trial_name]
+
+                    if trial_df.empty:
+                        ax.axis("off")
+                        continue
+
+                    trial_df = trial_df.iloc[0]
+
+                    tone_t = np.asarray(trial_df["Tone_Time_Axis"])
+                    tone_z = np.asarray(trial_df["Tone_Zscore"])
+
+                    # cue index (closest match in filtered cues)
+                    cue_list = trial_df["filtered_sound_cues"]
+
+                    if cue_time in cue_list:
+                        idx = cue_list.index(cue_time)
+                    else:
+                        idx = np.argmin(np.abs(np.array(cue_list) - cue_time))
+
+                    if idx >= len(tone_z):
+                        ax.axis("off")
+                        continue
+
+                    t = np.asarray(tone_t[idx])
+                    x = np.asarray(tone_z[idx])
+
+                    # skip invalid traces
+                    if len(t) == 0 or len(x) == 0:
+                        ax.axis("off")
+                        continue
+
+                    if np.all(np.isnan(x)):
+                        ax.axis("off")
+                        continue
+                    start_rel = start - cue_time
+                    ax.plot(t, x, color=color, linewidth=3, alpha=alpha)
+                    ax.axvline(start_rel, color="k", linestyle="--", linewidth=1)
+
+                    end_rel = min(end - cue_time, window[1])
+
+                    ax.axvspan(
+                        start_rel,
+                        end_rel,
+                        color=color,
+                        alpha=0.25
+                    )
+
+                    ax.axvline(
+                        0,
+                        color="red",
+                        linestyle=":",
+                        linewidth=2,
+                        alpha=0.8
+                        )
+                    
+                    ax.axvline(
+                        4,
+                        color="blue",
+                        linestyle=":",
+                        linewidth=2,
+                        alpha=0.8
+                        )
+
+                    # -----------------------------------
+                    # labels
+                    # -----------------------------------
+                    ax.set_title(
+                        f"{trial_name} | {init} | cue id: {cue_id} | Winner: {winner}"
+                    )
+
+                    ax.set_xlim(window)
+                    ax.set_ylabel("Z-score")
+
+            axes[-1].set_xlabel("Time (s)")
+            plt.tight_layout()
+            plt.show()
+
     """*****************************PLOTTING***********************************"""
     def old_plot_mean_psth(self,
                        winner_df: pd.DataFrame,
