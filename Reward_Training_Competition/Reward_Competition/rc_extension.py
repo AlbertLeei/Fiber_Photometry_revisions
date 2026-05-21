@@ -942,7 +942,6 @@ class Reward_Competition(RTC):
         Returns a DataFrame with columns:
         'subject_name', 'mean_trace', 'time_axis'
         """
-        import numpy as np
 
         rows = []
         zcol = f"{event_type}_Zscore"
@@ -1459,169 +1458,6 @@ class Reward_Competition(RTC):
                 )
         plt.show()
 
-    def plot_event_bank_by_trial2(self,
-                                    initiator=None,
-                                    save_path=None,
-                                    figsize=(12, 5),
-                                    alpha=0.8
-                                ):
-        if not hasattr(self, "event_traces"):
-            raise ValueError("Run build_subject_traces_df_reward_tone first")
-
-        if save_path is not None:
-            os.makedirs(save_path, exist_ok=True)
-
-        REGION_COLOR = {
-            "NAc": "#15616F",
-            "PFC": "#FFAF00"
-        }
-
-        WINDOW = (-5, 5)
-
-        # ----------------------------------------------------
-        # LOOP TRIALS
-        # ----------------------------------------------------
-        for trial_name, initiator_dict in self.event_traces.items():
-
-            trial = self.trials[trial_name]
-
-            color = REGION_COLOR["NAc"] if trial_name.startswith("n") else REGION_COLOR["PFC"]
-
-            # cue times for mapping indices
-            try:
-                cue_times_all = np.asarray(
-                    trial.rtc_events["sound cues"]["onset_times"]
-                )
-            except Exception:
-                cue_times_all = np.array([])
-
-            # ----------------------------------------------------
-            # COLLECT BOUTS
-            # ----------------------------------------------------
-            all_bouts = []
-
-            for init, bouts in initiator_dict.items():
-
-                if initiator is not None and init != initiator:
-                    continue
-
-                for bout in bouts:
-                    all_bouts.append((init, bout))
-
-            if len(all_bouts) == 0:
-                continue
-
-            # ----------------------------------------------------
-            # FIGURE
-            # ----------------------------------------------------
-            fig, axes = plt.subplots(
-                len(all_bouts),
-                1,
-                figsize=(figsize[0], figsize[1] * len(all_bouts)),
-                sharex=True
-            )
-
-            if len(all_bouts) == 1:
-                axes = [axes]
-
-            # ----------------------------------------------------
-            # PLOT EACH BOUT
-            # ----------------------------------------------------
-            for ax, (init, bout_traces) in zip(axes, all_bouts):
-                for trace in bout_traces:
-                    t = np.asarray(trace["time"])
-                    cue_time = cue_times_all[idx]
-                    raw_time = t + cue_time   # ONLY valid if t is relative to cue
-                    x = np.asarray(trace["trace"])
-                    start = trace["start"]
-                    if len(t) == 0:
-                        continue
-                    duration = trace["end"] - trace["start"]
-
-                    trace_end = t.max()
-
-                    shade_end = min(duration, trace_end)
-
-                    # --------------------------------------------
-                    # FIXED WINDOW (-5 to 5)
-                    # --------------------------------------------
-                    # mask = (t >= WINDOW[0]) & (t <= WINDOW[1])
-
-                    # t = t[mask]
-                    # x = x[mask]
-
-                    mask = (t >= WINDOW[0]) & (t <= WINDOW[1])
-
-                    t_rel = t[mask]
-                    x = x[mask]
-
-                    cue_time = cue_times_all[idx]
-                    raw_time = t_rel + cue_time
-
-                    if len(t) == 0:
-                        continue
-
-                    ax.plot(
-                        raw_time,
-                        x,
-                        color=color,
-                        linewidth=2.5,
-                        alpha=alpha
-                    )
-
-                    # bout onset
-                    ax.axvline(0, color="k", linestyle="--", linewidth=1)
-
-                    # --------------------------------------------
-                    # cue markers
-                    # --------------------------------------------
-                    idx = trace["cue_index"]
-
-                    if idx < len(cue_times_all):
-                        ct = cue_times_all[idx]
-                        cue_rel = ct - trace["start"]
-                        reward_rel = cue_rel + 4
-
-                        if WINDOW[0] <= cue_rel <= WINDOW[1]:
-                            ax.axvline(
-                                cue_rel,
-                                color="red",
-                                linestyle=":",
-                                linewidth=2,
-                                alpha=0.8
-                            )
-
-                            ax.axvspan(
-                                0,
-                                shade_end,
-                                color=color,
-                                alpha=0.25
-                            )
-
-                            ax.axvline(
-                                reward_rel,
-                                color="blue",
-                                linestyle=":",
-                                linewidth=2,
-                                alpha=0.8
-                            )
-                    ax.set_title(f"{trial_name} | {init} | Bout-aligned | Bout start: {start}")
-                ax.set_xlim(raw_time.min(), raw_time.max())
-                # ax.set_xlim(WINDOW)
-                ax.set_ylabel("Z-score")
-
-            axes[-1].set_xlabel("Time (s)")
-            plt.tight_layout()
-
-            # ----------------------------------------------------
-            # SAVE
-            # ----------------------------------------------------
-            if save_path is not None:
-                fname = f"{trial_name}_event_bank.png"
-                plt.savefig(os.path.join(save_path, fname), dpi=300, bbox_inches="tight")
-
-            plt.show()
-
 
     def find_preceding_cues(self,
                             cue_key="sound cues",
@@ -1998,6 +1834,140 @@ class Reward_Competition(RTC):
             axes[-1].set_xlabel("Time (s)")
             plt.tight_layout()
             plt.show()
+
+    def compute_subject_mean_traces_tone_initiator(self,
+                                                initiator=None,
+                                                winner=None,
+                                                window=(-4, 10),
+                                                region=None
+                                                ):
+        """
+        Computes mean DA traces from event_bank + da_df.
+
+        Filters:
+            initiator
+            winner (Subject / Social Agent)
+            region (NAc / PFC)
+        """
+
+        if not hasattr(self, "event_traces"):
+            raise ValueError("Run build_event_bank_from_preceding_cues first")
+
+        if not hasattr(self, "da_df"):
+            raise ValueError("Run compute_EI_DA first")
+
+        event_bank = self.event_traces
+        df = self.da_df
+
+        collected = []
+        time_grid = None
+
+        # ---------------------------------------------------
+        # LOOP TRIALS
+        # ---------------------------------------------------
+        for trial_name, initiator_dict in event_bank.items():
+
+            trial_df = df[df["file name"] == trial_name]
+            if trial_df.empty:
+                continue
+
+            trial_row = trial_df.iloc[0]
+
+            tone_t = trial_row["Tone_Time_Axis"]
+            tone_z = trial_row["Tone_Zscore"]
+
+            subject_id = trial_name.split("-")[0]
+
+            # ---------------------------------------------------
+            # LOOP INITIATORS
+            # ---------------------------------------------------
+            for init, traces in initiator_dict.items():
+
+                if initiator is not None and init != initiator:
+                    continue
+
+                for trace in traces:
+
+                    # -----------------------------
+                    # winner logic (FIXED)
+                    # -----------------------------
+                    trace_winner = trace.get("winner", None)
+
+                    outcome = "Subject" if trace_winner == subject_id else "Social Agent"
+
+                    if winner is not None and outcome != winner:
+                        continue
+
+                    # -----------------------------
+                    # region filter (NEW)
+                    # -----------------------------
+                    if region is not None:
+                        subject_region = subject_id[0]
+                        if subject_region != region[0]:
+                            continue
+
+                    cue_id = trace.get("cue_id", None)
+                    if cue_id is None:
+                        continue
+
+                    cue_id = int(cue_id)
+
+                    tone_t_list = tone_t
+                    tone_z_list = tone_z
+
+                    if cue_id >= len(tone_z_list):
+                        continue
+
+                    t = np.asarray(tone_t_list[cue_id])
+                    x = np.asarray(tone_z_list[cue_id])
+
+                    if len(t) == 0 or len(x) == 0:
+                        continue
+
+                    if np.all(np.isnan(x)):
+                        continue
+
+                    # -----------------------------
+                    # windowing
+                    # -----------------------------
+                    mask = (t >= window[0]) & (t <= window[1])
+                    t = t[mask]
+                    x = x[mask]
+
+                    if len(x) == 0:
+                        continue
+
+                    # -----------------------------
+                    # establish shared time axis safely
+                    # -----------------------------
+                    if time_grid is None:
+                        time_grid = t
+                    else:
+                        # enforce alignment (critical fix)
+                        if len(t) != len(time_grid):
+                            continue
+
+                    collected.append(x)
+
+        # ---------------------------------------------------
+        # FINAL OUTPUT
+        # ---------------------------------------------------
+        if len(collected) == 0:
+            print("No traces matched filters")
+            return None
+
+        data = np.vstack(collected)
+
+        mean_trace = np.nanmean(data, axis=0)
+        sem_trace = np.nanstd(data, axis=0) / np.sqrt(data.shape[0])
+
+        return {
+            "time": time_grid,
+            "mean": mean_trace,
+            "sem": sem_trace,
+            "n": data.shape[0]
+        }
+
 
     """*****************************PLOTTING***********************************"""
     def old_plot_mean_psth(self,
