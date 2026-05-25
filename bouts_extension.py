@@ -27,7 +27,6 @@ def get_trial_dataframes(experiment):
 
     return trial_data
 
-
 def create_metadata_dataframe(trial_data, behavior="Investigation", desired_bouts=None):
     """
     Parameters
@@ -95,6 +94,9 @@ def create_metadata_dataframe(trial_data, behavior="Investigation", desired_bout
     return final_df
 
 def create_metadata_dataframe2(trial_data, behavior=None, desired_bouts=None):
+    """Similar to create_metadata_dataframe, but designed to handle "Bout" columns that may not be present, 
+    and to be more flexible with behavior filtering."""
+
 
     metadata_rows = []
 

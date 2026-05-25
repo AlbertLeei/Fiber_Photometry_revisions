@@ -215,7 +215,7 @@ class Experiment:
         """
         Extracts bout information for non-reward induced competition BORIS, separating who initiated behavior
         combining consecutive behaviors under a certain time threshold and removes behaviors shorter than a certain threshold
-        Also removes bout events around tone times.
+        Also removes bout events around tone times when cue is False.
         Cue refers to if you want to filter for or remove all behaviors during cue times.
         """
         for trial_name, trial in self.trials.items():
@@ -240,29 +240,6 @@ class Experiment:
                 trial.remove_short_behaviors(
                     behavior_name="all",
                     min_duration=min_duration
-                )
-
-            else:
-                print(f"Warning: No CSV found for {trial_name}. Skipping.")
-
-    def group_extract_reward_competition_annotations(self, bout_definitions, first_only= False, pre_window=2.5):
-        
-        
-        for trial_name, trial in self.trials.items():
-            csv_path = os.path.join(self.behavior_folder_path, f"{trial_name}.csv")
-
-            if os.path.exists(csv_path):
-                print(csv_path)
-                trial.extract_bouts_and_behaviors2(
-                    csv_path,
-                    bout_definitions,
-                    first_only=first_only, 
-                    pre_window=pre_window
-                )
-
-                trial.remove_short_behaviors(
-                    behavior_name="all",
-                    min_duration=1
                 )
 
             else:

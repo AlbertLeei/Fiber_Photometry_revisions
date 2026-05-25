@@ -687,7 +687,7 @@ class Reward_Competition(RTC):
 
             # Set the y-tick labels with specified interval
             if idx == 0:
-                y_min, y_max = ax.get_ylim()
+                y_min, y_max = ax.ylim()
                 y_ticks = np.arange(np.floor(y_min / yticks_interval) * yticks_interval,
                                     np.ceil(y_max / yticks_interval) * yticks_interval + yticks_interval,
                                     yticks_interval)
@@ -1010,7 +1010,14 @@ class Reward_Competition(RTC):
     
     
     def build_subject_traces_df(self, event_label="Competition Bout"):
-
+        """
+        Builds a DataFrame with columns:
+        - subject_name (str): e.g. 'n1'
+        - initiator (str): e.g. 'n1' or 'p3'
+        - {event_label}_Zscore (list of arrays): list of z-score traces for each
+            bout initiated by that subject
+        - {event_label}_Time_Axis (list of arrays): corresponding time axes for each bout
+        """
         rows = []
 
         for trial_name, trial in self.trials.items():
@@ -1031,7 +1038,94 @@ class Reward_Competition(RTC):
 
         return pd.DataFrame(rows)
 
-    
+    def plot_group_mean_traces_non_reward(self,            
+                            subj_traces: pd.DataFrame,
+                            event_type: str,
+                            brain_region: str,
+                            initiator: str = None,
+                            color: str = None,
+                            title: str = None,
+                            ylim: tuple = None,
+                            figsize=(8,5),
+                            pre_window=-5,
+                            post_time=5,
+                            save_path: str = None
+                            ):
+            """
+            Given the per-subject mean traces (output of compute_subject_mean_traces),
+            filter by brain_region ('NAc' vs 'mPFC'), compute group mean ± SEM,
+            and plot a single PSTH.
+            """
+            # filter by prefix n* vs p*
+            if brain_region == "NAc":
+                grp = subj_traces[subj_traces["subject_name"].str.startswith("n")]
+                default_color = "#15616F"
+            else:
+                grp = subj_traces[subj_traces["subject_name"].str.startswith("p")]
+                default_color = "#FFAF00"
+
+            # initiator filter
+            if initiator is not None:
+                grp = grp[grp["initiator"] == initiator]
+
+            if grp.empty:
+                print(f"No data for region {brain_region}")
+                return
+            
+            # assemble array (n_subjects x n_time)
+            M = np.vstack(grp["mean_trace"].values)
+            mean_trace = np.nanmean(M, axis=0)
+            sem_trace  = np.nanstd(M, axis=0, ddof=1) / np.sqrt(M.shape[0])
+
+            # time_axis (shared by all)
+            t = grp.iloc[0]["time_axis"]
+
+            # (skip downsampling here; use your downsample_data if desired)
+            ds_time, ds_mean, ds_sem = t, mean_trace, sem_trace
+
+            c = color or default_color
+
+            fig, ax = plt.subplots(figsize=figsize)
+            ax.plot(ds_time, ds_mean, color=c, lw=3, label=f"{brain_region} Mean")
+            ax.fill_between(ds_time,
+                            ds_mean - ds_sem,
+                            ds_mean + ds_sem,
+                            color=c, alpha=0.4,
+                            label="SEM")
+
+            # vertical onset lines
+            ax.axvline(0, color="k",      ls="--", lw=2)
+
+            # labels & title
+            ax.set_xlabel("Time (s)",         fontsize=14)
+            ax.set_ylabel("z-scored ΔF/F",    fontsize=14)
+            if title:
+                ax.set_title(title, fontsize=18, fontweight='bold')
+            else:
+                ax.set_title(f"{brain_region} {initiator} initiated {event_type}", fontsize=18, fontweight='bold')
+
+            # apply custom y-limits if provided
+            if ylim is not None:
+                ax.set_ylim(ylim)
+
+            # ticks & layout
+            ax.set_xticks([pre_window, 0, post_time])
+            ax.tick_params(axis='both', which='major', labelsize=12, length=6, width=1.5)
+
+            # remove top & right spines
+            ax.spines['top'].set_visible(False)
+            ax.spines['right'].set_visible(False)
+            ax.spines['bottom'].set_linewidth(1.5)
+            ax.spines['left'].set_linewidth(1.5)
+
+            plt.tight_layout()
+
+            if save_path:
+                os.makedirs(os.path.dirname(save_path), exist_ok=True)
+                fig.savefig(save_path, dpi=300, bbox_inches="tight")
+
+            plt.show()
+    """**********************REWARD INDUCED COMPETITION*******************************"""
     def build_subject_traces_df_reward(self,
                                         cue_window=10,
                                     ):
@@ -1207,100 +1301,17 @@ class Reward_Competition(RTC):
 
         self.event_traces = event_bank
         return event_bank
-
-    def plot_group_mean_traces_non_reward(self,            
-                           subj_traces: pd.DataFrame,
-                           event_type: str,
-                           brain_region: str,
-                           initiator: str = None,
-                           color: str = None,
-                           title: str = None,
-                           ylim: tuple = None,
-                           figsize=(8,5),
-                           pre_window=-5,
-                           post_time=5,
-                           save_path: str = None
-                           ):
-        """
-        Given the per-subject mean traces (output of compute_subject_mean_traces),
-        filter by brain_region ('NAc' vs 'mPFC'), compute group mean ± SEM,
-        and plot a single PSTH.
-        """
-        # filter by prefix n* vs p*
-        if brain_region == "NAc":
-            grp = subj_traces[subj_traces["subject_name"].str.startswith("n")]
-            default_color = "#15616F"
-        else:
-            grp = subj_traces[subj_traces["subject_name"].str.startswith("p")]
-            default_color = "#FFAF00"
-
-        # initiator filter
-        if initiator is not None:
-            grp = grp[grp["initiator"] == initiator]
-
-        if grp.empty:
-            print(f"No data for region {brain_region}")
-            return
-        
-        # assemble array (n_subjects x n_time)
-        M = np.vstack(grp["mean_trace"].values)
-        mean_trace = np.nanmean(M, axis=0)
-        sem_trace  = np.nanstd(M, axis=0, ddof=1) / np.sqrt(M.shape[0])
-
-        # time_axis (shared by all)
-        t = grp.iloc[0]["time_axis"]
-
-        # (skip downsampling here; use your downsample_data if desired)
-        ds_time, ds_mean, ds_sem = t, mean_trace, sem_trace
-
-        c = color or default_color
-
-        fig, ax = plt.subplots(figsize=figsize)
-        ax.plot(ds_time, ds_mean, color=c, lw=3, label=f"{brain_region} Mean")
-        ax.fill_between(ds_time,
-                        ds_mean - ds_sem,
-                        ds_mean + ds_sem,
-                        color=c, alpha=0.4,
-                        label="SEM")
-
-        # vertical onset lines
-        ax.axvline(0, color="k",      ls="--", lw=2)
-
-        # labels & title
-        ax.set_xlabel("Time (s)",         fontsize=14)
-        ax.set_ylabel("z-scored ΔF/F",    fontsize=14)
-        if title:
-            ax.set_title(title, fontsize=18, fontweight='bold')
-        else:
-            ax.set_title(f"{brain_region} {initiator} initiated {event_type}", fontsize=18, fontweight='bold')
-
-        # apply custom y-limits if provided
-        if ylim is not None:
-            ax.set_ylim(ylim)
-
-        # ticks & layout
-        ax.set_xticks([pre_window, 0, post_time])
-        ax.tick_params(axis='both', which='major', labelsize=12, length=6, width=1.5)
-
-        # remove top & right spines
-        ax.spines['top'].set_visible(False)
-        ax.spines['right'].set_visible(False)
-        ax.spines['bottom'].set_linewidth(1.5)
-        ax.spines['left'].set_linewidth(1.5)
-
-        plt.tight_layout()
-
-        if save_path:
-            os.makedirs(os.path.dirname(save_path), exist_ok=True)
-            fig.savefig(save_path, dpi=300, bbox_inches="tight")
-
-        plt.show()
     
     def plot_event_bank_by_trial(self,
                                 initiator=None,
                                 save_path=None,
                                 figsize=(12, 5),
                                 alpha=1):
+        """
+        Plots all traces in event_bank, organized by trial and initiator.
+        Each trace is shaded by its duration, and cue times are marked.
+        Aligned to bout not tone.
+        """
 
         if not hasattr(self, "event_traces"):
             raise ValueError("Run build_subject_traces_df_reward first")
@@ -1674,6 +1685,9 @@ class Reward_Competition(RTC):
         DA-native plotting:
         - uses da_df as ground truth
         - event_bank only provides metadata
+        Plots all traces in event_bank, organized by trial and initiator.
+        Each trace is shaded by its duration, and cue times are marked.
+        Aligned to tone.
         """
 
         if not hasattr(self, "event_traces"):
