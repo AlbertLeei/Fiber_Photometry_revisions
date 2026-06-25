@@ -8,6 +8,7 @@ from trial_class import *
 from itertools import combinations
 import seaborn as sns
 from statsmodels.stats.multitest import multipletests
+from matplotlib.lines import Line2D
 
 
 from scipy.optimize import curve_fit
@@ -226,6 +227,240 @@ def create_da_metrics_first_instance(
     return pd.DataFrame(rows)
 
 
+def create_first_investigation_bout_summary_df(
+    trial_data,
+    behavior="Investigation",
+    desired_bouts=None,
+    time_col="Event_Start",
+    group_label_map=None,
+    group_col="Group",
+):
+    """
+    Build one row per Subject x Bout using the first investigation DA metric
+    and the total investigation duration accumulated across the whole bout.
+
+    Parameters
+    ----------
+    trial_data : dict
+        {subject_id: behaviors_df}
+    behavior : str, optional
+        Behavior used to define investigation events.
+    desired_bouts : list or None, optional
+        Bout labels to include. If None, all bouts present for each subject
+        are used.
+    time_col : str, optional
+        Column used to identify the first investigation in each bout.
+    group_label_map : dict or callable or None, optional
+        If dict, maps either full bout labels or bout prefixes to display
+        groups. If callable, it should take ``bout`` and return a label.
+    group_col : str, optional
+        Name of the grouping column added to the output.
+
+    Returns
+    -------
+    pd.DataFrame
+        Columns include:
+        Subject, Bout, Group, First Investigation Duration,
+        Total Investigation Duration, AUC, Max Peak, Mean Z-score.
+    """
+    rows = []
+
+    for subject_id, df in trial_data.items():
+        bouts = desired_bouts if desired_bouts is not None else df["Bout"].dropna().unique()
+
+        for bout in bouts:
+            df_bout = df[df["Bout"] == bout]
+            df_behavior = df_bout[df_bout["Behavior"] == behavior].copy()
+
+            if df_behavior.empty:
+                continue
+
+            df_behavior = df_behavior.sort_values(time_col, ascending=True)
+            first = df_behavior.iloc[0]
+            bout_prefix = str(bout).split("-")[0]
+
+            if callable(group_label_map):
+                group_value = group_label_map(bout)
+            elif isinstance(group_label_map, dict):
+                group_value = group_label_map.get(bout, group_label_map.get(bout_prefix, bout_prefix))
+            else:
+                group_value = bout_prefix
+
+            rows.append(
+                {
+                    "Subject": subject_id,
+                    "Bout": bout,
+                    group_col: group_value,
+                    "First Investigation Duration": first["Duration (s)"],
+                    "Total Investigation Duration": df_behavior["Duration (s)"].sum(),
+                    "AUC": first.get("AUC", np.nan),
+                    "Max Peak": first.get("Max Peak", np.nan),
+                    "Mean Z-score": first.get("Mean Z-score", np.nan),
+                }
+            )
+
+    return pd.DataFrame(rows)
+
+
+def plot_first_investigation_da_vs_total_duration(
+    summary_df,
+    da_col="Mean Z-score",
+    duration_col="Total Investigation Duration",
+    group_col="Group",
+    group_order=None,
+    group_colors=None,
+    title="",
+    xlabel=None,
+    ylabel="Investigation Duration (s)",
+    stats_loc=(0.05, 0.78),
+    figsize=(9, 7),
+    marker_size=260,
+    line_style=(0, (8, 6)),
+    line_width=2.5,
+    ax=None,
+    save=False,
+    save_name=None,
+    pad_inches=0.1,
+    n_label="bouts",
+):
+    """
+    Scatter plot of first-investigation DA vs total investigation duration per
+    bout, colored by a grouping column such as novelty or agent.
+    """
+    if da_col not in summary_df.columns:
+        raise ValueError(f"'{da_col}' not found in summary_df columns.")
+    if duration_col not in summary_df.columns:
+        raise ValueError(f"'{duration_col}' not found in summary_df columns.")
+    if group_col not in summary_df.columns:
+        raise ValueError(f"'{group_col}' not found in summary_df columns.")
+
+    plot_df = summary_df.dropna(subset=[da_col, duration_col]).copy()
+    if plot_df.empty:
+        raise ValueError("No valid rows remain after dropping missing DA/duration values.")
+
+    created_fig = False
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+        created_fig = True
+    else:
+        fig = ax.figure
+
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_linewidth(3)
+    ax.spines["bottom"].set_linewidth(3)
+
+    if group_order is None:
+        seen = plot_df[group_col].dropna().tolist()
+        group_order = list(dict.fromkeys(seen))
+
+    legend_handles = []
+
+    for idx, group_name in enumerate(group_order):
+        group_df = plot_df[plot_df[group_col] == group_name]
+        if group_df.empty:
+            continue
+
+        color = None
+        if group_colors is not None:
+            color = group_colors.get(group_name)
+        if color is None:
+            color = plt.rcParams["axes.prop_cycle"].by_key()["color"][idx % len(plt.rcParams["axes.prop_cycle"].by_key()["color"])]
+
+        ax.scatter(
+            group_df[da_col],
+            group_df[duration_col],
+            s=marker_size,
+            facecolors="none",
+            edgecolors=color,
+            linewidth=2.5,
+            alpha=0.95,
+            zorder=3,
+        )
+        legend_handles.append(
+            Line2D(
+                [0],
+                [0],
+                marker="o",
+                linestyle="None",
+                markerfacecolor="none",
+                markeredgecolor=color,
+                markeredgewidth=2.5,
+                markersize=np.sqrt(marker_size) / 1.6,
+                label=str(group_name),
+            )
+        )
+
+    x_vals = plot_df[da_col].to_numpy(dtype=float)
+    y_vals = plot_df[duration_col].to_numpy(dtype=float)
+
+    stats_lines = ["r = ---", "p = ---", f"n = {len(plot_df)} {n_label}"]
+    if len(plot_df) > 1 and np.ptp(x_vals) > 0:
+        slope, intercept, r_val, p_val, _ = linregress(x_vals, y_vals)
+        x_fit = np.linspace(np.nanmin(x_vals), np.nanmax(x_vals), 200)
+        y_fit = slope * x_fit + intercept
+        ax.plot(x_fit, y_fit, color="black", linewidth=line_width, linestyle=line_style, zorder=2)
+        stats_lines = [f"r = {r_val:.3f}", f"p = {p_val:.3g}", f"n = {len(plot_df)} {n_label}"]
+
+    ax.text(
+        stats_loc[0],
+        stats_loc[1],
+        "\n".join(stats_lines),
+        transform=ax.transAxes,
+        fontsize=18,
+        va="bottom",
+        ha="left",
+    )
+
+    ax.set_xlabel(xlabel if xlabel else f"{da_col} during 1st investigation", fontsize=20)
+    ax.set_ylabel(ylabel, fontsize=20)
+    ax.set_title(title, fontsize=22)
+    ax.tick_params(axis="both", labelsize=16)
+
+    if legend_handles:
+        ax.legend(handles=legend_handles, title=group_col, frameon=False, fontsize=13, title_fontsize=14)
+
+    if created_fig:
+        plt.tight_layout()
+        if save:
+            if save_name is None:
+                raise ValueError("save_name must be provided if save is True.")
+            plt.savefig(save_name, transparent=True, bbox_inches="tight", pad_inches=pad_inches)
+
+    return plot_df, fig, ax
+
+
+def plot_first_investigation_da_vs_total_duration_from_experiment(
+    experiment,
+    behavior="Investigation",
+    desired_bouts=None,
+    time_col="Event_Start",
+    group_label_map=None,
+    group_col="Group",
+    **plot_kwargs,
+):
+    """
+    Convenience wrapper that computes the per-bout summary from an Experiment
+    object, then plots the first-investigation DA vs total investigation
+    duration relationship.
+    """
+    trial_data = get_trial_dataframes(experiment)
+    summary_df = create_first_investigation_bout_summary_df(
+        trial_data=trial_data,
+        behavior=behavior,
+        desired_bouts=desired_bouts,
+        time_col=time_col,
+        group_label_map=group_label_map,
+        group_col=group_col,
+    )
+    plot_df, fig, ax = plot_first_investigation_da_vs_total_duration(
+        summary_df=summary_df,
+        group_col=group_col,
+        **plot_kwargs,
+    )
+    return summary_df, plot_df, fig, ax
+
+
 
 def plot_behavior_across_bouts_no_identities(
     metadata_df,
@@ -280,9 +515,16 @@ def plot_behavior_across_bouts_no_identities(
 
     # 7) Individual subject lines + markers
     for subject in pivot_df.index:
+        x_vals = np.arange(len(pivot_df.columns))
+        y_vals = np.asarray(pivot_df.loc[subject].values, dtype=float)
+        valid = ~np.isnan(y_vals)
+        left_valid = np.r_[False, valid[:-1]]
+        right_valid = np.r_[valid[1:], False]
+        connected = valid & (left_valid | right_valid)
+
         ax.plot(
-            np.arange(len(pivot_df.columns)),
-            pivot_df.loc[subject].values,
+            x_vals,
+            y_vals,
             linestyle='-',
             color='gray',
             alpha=0.5,
@@ -290,8 +532,8 @@ def plot_behavior_across_bouts_no_identities(
             zorder=1
         )
         ax.scatter(
-            np.arange(len(pivot_df.columns)),
-            pivot_df.loc[subject].values,
+            x_vals[connected],
+            y_vals[connected],
             facecolors='none',
             edgecolors='gray',
             s=120,
@@ -432,10 +674,15 @@ def plot_behavior_across_bouts_with_identities(metadata_df,
                                              figsize=(12,7),
                                              pad_inches=0.1,
                                              save=False,
-                                             save_name=None):
+                                             save_name=None,
+                                             legend_title="Mouse",
+                                             legend_loc="upper left",
+                                             legend_bbox_to_anchor=(1.02, 1.0),
+                                             legend_fontsize=18,
+                                             legend_title_fontsize=20):
     """
-    Plots a bar chart with error bars (SEM) and individual subject lines in **color** (instead of gray),
-    and provides a legend mapping subjects to their respective colors.
+    Plots a bar chart with error bars (SEM) and individual subject lines in color,
+    and provides a right-side legend mapping subjects to mouse identity.
     """
 
     # 1) Optionally filter by behavior
@@ -478,12 +725,33 @@ def plot_behavior_across_bouts_with_identities(metadata_df,
 
     # 8) Plot each subject's data in **color** rather than gray
     for subject in pivot_df.index:
-        ax.plot(pivot_df.columns, pivot_df.loc[subject],
-                linestyle='-', color=subject_color_map[subject], alpha=0.8,
-                linewidth=2.5, zorder=1, label=subject)
-        ax.scatter(pivot_df.columns, pivot_df.loc[subject],
-                   facecolors='none', edgecolors=subject_color_map[subject],
-                   s=120, alpha=0.9, linewidth=4, zorder=2)
+        x_vals = np.arange(len(pivot_df.columns))
+        y_vals = np.asarray(pivot_df.loc[subject].values, dtype=float)
+        valid = ~np.isnan(y_vals)
+        left_valid = np.r_[False, valid[:-1]]
+        right_valid = np.r_[valid[1:], False]
+        connected = valid & (left_valid | right_valid)
+
+        ax.plot(
+            x_vals,
+            y_vals,
+            linestyle='-',
+            color=subject_color_map[subject],
+            alpha=0.8,
+            linewidth=2.5,
+            zorder=1,
+            label=subject
+        )
+        ax.scatter(
+            x_vals[connected],
+            y_vals[connected],
+            facecolors='none',
+            edgecolors=subject_color_map[subject],
+            s=120,
+            alpha=0.9,
+            linewidth=4,
+            zorder=2
+        )
 
     # 9) Set axis labels and title
     if ylabel is None:
@@ -533,11 +801,19 @@ def plot_behavior_across_bouts_with_identities(metadata_df,
     ax.spines['left'].set_linewidth(5)
     ax.spines['bottom'].set_linewidth(5)
 
-    # 14) Add legend for subjects
-    ax.legend(title="Subjects", fontsize=18, title_fontsize=20, loc='upper right', bbox_to_anchor=(1.2, 1))
+    # 14) Add legend for mouse identities on the right
+    ax.legend(
+        title=legend_title,
+        fontsize=legend_fontsize,
+        title_fontsize=legend_title_fontsize,
+        loc=legend_loc,
+        bbox_to_anchor=legend_bbox_to_anchor,
+        frameon=False,
+        borderaxespad=0.0
+    )
 
     # 15) Adjust layout and save the figure if requested
-    plt.tight_layout()
+    plt.tight_layout(rect=(0, 0, 0.86, 1))
     if save:
         if save_name is None:
             raise ValueError("save_name must be provided if save is True.")
@@ -562,12 +838,16 @@ def plot_peak_for_subsequent_behaviors(
     xlabel="Behavior Index",
     ylabel="Average Peak ΔF/F",
     plot_title="Average Peak per Behavior",
+    axis_label_fontsize=42,
+    tick_label_fontsize=35,
+    legend_fontsize=30,
     save=False,
     save_path="peaks_for_subsequent_behaviors.png"
 ):
     import pandas as pd
     import numpy as np
     import matplotlib.pyplot as plt
+    from matplotlib.colors import is_color_like
     from scipy.stats import linregress
     from scipy.optimize import curve_fit
 
@@ -627,7 +907,7 @@ def plot_peak_for_subsequent_behaviors(
     ax.spines["right"].set_visible(False)
     ax.spines["left"].set_linewidth(5)
     ax.spines["bottom"].set_linewidth(5)
-    ax.tick_params(axis="both", which="major", labelsize=28)
+    ax.tick_params(axis="both", which="major", labelsize=tick_label_fontsize)
 
     metrics_dict = {}
     unique_bouts = line_order if line_order else sorted(agg_df["Bout"].dropna().unique())
@@ -672,12 +952,19 @@ def plot_peak_for_subsequent_behaviors(
         else:
             raise ValueError("metric_type must be 'slope' or 'decay'.")
 
-        color = custom_colors[i % len(custom_colors)]
-        subject_n = df_line["SubjectCount"].max() if df_line["SubjectCount"].notna().any() else 0
-        legend_label = (
-            custom_legend_labels[i] if custom_legend_labels and i < len(custom_legend_labels)
-            else f"{bout} ({metric_label}, n={subject_n})"
-        )
+        if isinstance(custom_colors, dict):
+            default_cycle = plt.rcParams["axes.prop_cycle"].by_key()["color"]
+            color = custom_colors.get(bout, default_cycle[i % len(default_cycle)])
+        elif is_color_like(custom_colors):
+            color = custom_colors
+        else:
+            color = custom_colors[i % len(custom_colors)]
+        if isinstance(custom_legend_labels, dict):
+            legend_label = custom_legend_labels.get(bout, f"{bout} ({metric_label})")
+        elif custom_legend_labels and i < len(custom_legend_labels):
+            legend_label = custom_legend_labels[i]
+        else:
+            legend_label = f"{bout} ({metric_label})"
 
         ax.errorbar(
             x_vals, y_vals,
@@ -692,8 +979,8 @@ def plot_peak_for_subsequent_behaviors(
             zorder=3
         )
 
-    ax.set_xlabel(xlabel, fontsize=35, labelpad=12)
-    ax.set_ylabel(ylabel, fontsize=35, labelpad=12)
+    ax.set_xlabel(xlabel, fontsize=axis_label_fontsize, labelpad=12)
+    ax.set_ylabel(ylabel, fontsize=axis_label_fontsize, labelpad=12)
 
     if ylim is not None:
         ax.set_ylim(ylim)
@@ -701,20 +988,20 @@ def plot_peak_for_subsequent_behaviors(
             y_ticks = np.arange(ylim[0], ylim[1] + ytick_increment, ytick_increment)
             ax.set_yticks(y_ticks)
             y_tick_labels = [f"{int(yt)}" if float(yt).is_integer() else f"{yt:.1f}" for yt in y_ticks]
-            ax.set_yticklabels(y_tick_labels, fontsize=35)
+            ax.set_yticklabels(y_tick_labels, fontsize=tick_label_fontsize)
 
     if custom_xtick_labels:
         ax.set_xticks(np.arange(1, len(custom_xtick_labels) + 1))
-        ax.set_xticklabels(custom_xtick_labels, fontsize=35)
+        ax.set_xticklabels(custom_xtick_labels, fontsize=tick_label_fontsize)
     else:
         unique_x = np.arange(1, n_subsequent_behaviors + 1)
         ax.set_xticks(unique_x)
-        ax.set_xticklabels([str(x) for x in unique_x], fontsize=35)
+        ax.set_xticklabels([str(x) for x in unique_x], fontsize=tick_label_fontsize)
 
     if plot_title:
         ax.set_title(plot_title, fontsize=10)
 
-    ax.legend(fontsize=25)
+    ax.legend(fontsize=legend_fontsize)
     plt.tight_layout()
 
     if save and save_path:

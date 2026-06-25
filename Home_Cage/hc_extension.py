@@ -13,11 +13,16 @@ import os
 from scipy.signal import butter, filtfilt
 from sklearn.linear_model import LinearRegression
 from trial_class import *
+from bouts_extension import (
+    get_trial_dataframes,
+    create_first_investigation_bout_summary_df,
+    plot_first_investigation_da_vs_total_duration,
+)
 
 import matplotlib.pyplot as plt
 import re
 from scipy.stats import ttest_rel
-from scipy.stats import linregress
+from scipy.stats import linregress, pearsonr, ttest_ind
 import matplotlib.cm as cm
 
 
@@ -70,6 +75,820 @@ def trim_short_term_to_5min(trial_data, short_term_bout='Short_Term-1', max_dura
         trimmed_data[subject_id] = df_combined
 
     return trimmed_data 
+
+
+def _normalize_mouse_id(mouse_id):
+    if pd.isna(mouse_id):
+        return None
+    return str(mouse_id).strip().lower()
+
+
+def _load_rank_dataframe(rank_source):
+    """
+    Accept either a DataFrame with rank columns or a CSV/XLSX path and return a
+    normalized DataFrame with columns ['Subject', 'Rank'].
+    """
+    if isinstance(rank_source, pd.DataFrame):
+        rank_df = rank_source.copy()
+    elif isinstance(rank_source, str):
+        if rank_source.lower().endswith((".xlsx", ".xls")):
+            rank_df = pd.read_excel(rank_source)
+        else:
+            rank_df = pd.read_csv(rank_source)
+    else:
+        raise ValueError("rank_source must be a pandas DataFrame or a path to a CSV/XLSX file.")
+
+    rename_map = {}
+    for col in rank_df.columns:
+        col_norm = str(col).strip().lower()
+        if col_norm in {"subject", "id", "mouse_identity"}:
+            rename_map[col] = "Subject"
+        elif col_norm == "rank":
+            rename_map[col] = "Rank"
+
+    rank_df = rank_df.rename(columns=rename_map)
+    if "Subject" not in rank_df.columns or "Rank" not in rank_df.columns:
+        raise ValueError("rank_source must contain subject/id and rank columns.")
+
+    rank_df = rank_df[["Subject", "Rank"]].copy()
+    rank_df["Subject"] = rank_df["Subject"].map(_normalize_mouse_id)
+    rank_df = rank_df.dropna(subset=["Subject", "Rank"]).drop_duplicates(subset=["Subject"], keep="last")
+    return rank_df
+
+
+def load_long_term_cagemate_mapping(mapping_source):
+    """
+    Load the home-cage long-term cagemate workbook and return a subject->agent dict.
+    """
+    if isinstance(mapping_source, pd.DataFrame):
+        mapping_df = mapping_source.copy()
+    else:
+        mapping_df = pd.read_excel(mapping_source)
+
+    rename_map = {}
+    for col in mapping_df.columns:
+        col_norm = str(col).strip().lower()
+        if col_norm == "subject":
+            rename_map[col] = "Subject"
+        elif col_norm == "cagemate":
+            rename_map[col] = "Cagemate"
+
+    mapping_df = mapping_df.rename(columns=rename_map)
+    if "Subject" not in mapping_df.columns or "Cagemate" not in mapping_df.columns:
+        raise ValueError("Mapping file must contain 'Subject' and 'Cagemate' columns.")
+
+    mapping_df["Subject"] = mapping_df["Subject"].map(_normalize_mouse_id)
+    mapping_df["Cagemate"] = mapping_df["Cagemate"].map(_normalize_mouse_id)
+    mapping_df = mapping_df.dropna(subset=["Subject", "Cagemate"])
+    return dict(zip(mapping_df["Subject"], mapping_df["Cagemate"]))
+
+
+def find_ranks_using_ds(
+    file_path,
+    subject_col="subject",
+    agent_col="agent",
+    subject_wins_col="mouse_1_wins",
+    agent_wins_col="mouse_2_wins",
+    drop_ids=None,
+):
+    """
+    Standalone David's-score rank calculator for home-cage or other pairwise
+    interaction tables.
+
+    Expected columns by default:
+    - subject
+    - agent
+    - mouse_1_wins
+    - mouse_2_wins
+
+    Returns a DataFrame with columns:
+    ['ID', 'DS', 'Cage', 'Rank']
+    """
+    if drop_ids is None:
+        drop_ids = ["n8"]
+
+    def _creating_new_df(individuals_array):
+        columns = ["ID"]
+        w_array = [f"{mouse_id}w" for mouse_id in individuals_array]
+        m_array = [f"{mouse_id}m" for mouse_id in individuals_array]
+        columns.extend(w_array)
+        columns.extend(m_array)
+        calculations = ["w", "l", "w2", "l2", "DS"]
+        columns.extend(calculations)
+
+        empty_df = pd.DataFrame(columns=columns)
+        empty_df["ID"] = individuals_array
+        new_df = empty_df.fillna(0).infer_objects(copy=False)
+        new_df[calculations] = new_df[calculations].astype(float)
+        return new_df, w_array, m_array
+
+    df = pd.read_excel(file_path, header=0)
+    df.columns = [str(col).lower().strip().replace(" ", "_") for col in df.columns]
+
+    subject_col = subject_col.lower().strip().replace(" ", "_")
+    agent_col = agent_col.lower().strip().replace(" ", "_")
+    subject_wins_col = subject_wins_col.lower().strip().replace(" ", "_")
+    agent_wins_col = agent_wins_col.lower().strip().replace(" ", "_")
+
+    required_cols = [subject_col, agent_col, subject_wins_col, agent_wins_col]
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        raise ValueError(f"Missing required columns for David's score calculation: {missing_cols}")
+
+    df = df[required_cols].copy()
+    df[subject_col] = df[subject_col].map(_normalize_mouse_id)
+    df[agent_col] = df[agent_col].map(_normalize_mouse_id)
+    df = df.dropna(subset=[subject_col, agent_col])
+
+    individuals = sorted(set(df[subject_col]).union(set(df[agent_col])))
+    individuals_array = np.array(individuals)
+    new_df, w_array, m_array = _creating_new_df(individuals_array)
+    id_to_idx = {mouse_id: idx for idx, mouse_id in enumerate(individuals)}
+
+    for _, row in df.iterrows():
+        mouse1 = row[subject_col]
+        mouse2 = row[agent_col]
+        idx1 = id_to_idx[mouse1]
+        idx2 = id_to_idx[mouse2]
+
+        mouse1_wins = int(row[subject_wins_col]) if not pd.isna(row[subject_wins_col]) else 0
+        mouse2_wins = int(row[agent_wins_col]) if not pd.isna(row[agent_wins_col]) else 0
+        total_matches = mouse1_wins + mouse2_wins
+
+        new_df.loc[idx1, f"{mouse2}w"] += mouse1_wins
+        new_df.loc[idx2, f"{mouse1}w"] += mouse2_wins
+        new_df.loc[idx1, f"{mouse2}m"] += total_matches
+        new_df.loc[idx2, f"{mouse1}m"] += total_matches
+
+    for i in range(len(individuals_array)):
+        w_val = 0.0
+        l_val = 0.0
+        for j in range(len(individuals_array)):
+            num_wins = new_df.at[i, w_array[j]]
+            num_matches = new_df.at[i, m_array[j]]
+            if pd.isna(num_matches) or num_matches == 0:
+                continue
+            if pd.isna(num_wins):
+                num_wins = 0
+            p_win = num_wins / num_matches
+            p_loss = 1 - p_win
+            w_val += p_win
+            l_val += p_loss
+        new_df.loc[i, ["w", "l"]] = float(w_val), float(l_val)
+
+    for i in range(len(individuals_array)):
+        w2_val = 0.0
+        l2_val = 0.0
+        for j in range(len(individuals_array)):
+            num_wins = new_df.at[i, w_array[j]]
+            num_matches = new_df.at[i, m_array[j]]
+            if pd.isna(num_matches) or num_matches == 0:
+                continue
+            if pd.isna(num_wins):
+                num_wins = 0
+            p_win = num_wins / num_matches
+            p_loss = 1 - p_win
+            w_opp = new_df.at[j, "w"]
+            l_opp = new_df.at[j, "l"]
+            w2_val += p_win * w_opp
+            l2_val += p_loss * l_opp
+        new_df.at[i, "w2"] = float(w2_val)
+        new_df.at[i, "l2"] = float(l2_val)
+
+    new_df["DS"] = new_df["w"] + new_df["w2"] - new_df["l"] - new_df["l2"]
+    new_df = new_df[["ID", "DS"]].copy()
+
+    if drop_ids:
+        drop_ids_norm = {_normalize_mouse_id(mouse_id) for mouse_id in drop_ids}
+        new_df = new_df.loc[~new_df["ID"].isin(drop_ids_norm)].copy()
+
+    new_df["Prefix"] = new_df["ID"].str.extract(r"([a-zA-Z]+)")
+    new_df["Number"] = new_df["ID"].str.extract(r"(\d+)").astype(int)
+    new_df["Cage"] = new_df.apply(lambda row: f"{row['Prefix']}{1 if row['Number'] <= 4 else 2}", axis=1)
+    new_df["Rank"] = new_df.groupby("Cage")["DS"].rank(ascending=False, method="min").astype("Int64")
+    new_df = new_df.drop(columns=["Prefix", "Number"])
+    return new_df
+
+
+def find_home_cage_ranks_using_ds(file_path, **kwargs):
+    """
+    Convenience alias for David's-score ranking in home-cage analyses.
+    """
+    return find_ranks_using_ds(file_path, **kwargs)
+
+
+def build_home_cage_long_term_rank_summary(
+    experiment,
+    rank_source,
+    mapping_source,
+    behavior="Investigation",
+    bout_name="Long_Term-1",
+    da_col="Mean Z-score",
+):
+    """
+    Build one row per subject for the long-term home-cage bout, annotating the
+    mapped agent's absolute rank and whether that agent is higher or lower rank
+    than the resident subject.
+    """
+    if da_col not in {"Mean Z-score", "AUC", "Max Peak"}:
+        raise ValueError("da_col must be one of 'Mean Z-score', 'AUC', or 'Max Peak'.")
+
+    rank_df = _load_rank_dataframe(rank_source)
+    rank_dict = dict(zip(rank_df["Subject"], rank_df["Rank"]))
+    cagemate_dict = load_long_term_cagemate_mapping(mapping_source)
+
+    trial_data = get_trial_dataframes(experiment)
+    summary_df = create_first_investigation_bout_summary_df(
+        trial_data=trial_data,
+        behavior=behavior,
+        desired_bouts=[bout_name],
+        group_label_map={bout_name: bout_name},
+        group_col="BoutGroup",
+    )
+
+    if summary_df.empty:
+        return summary_df
+
+    summary_df = summary_df.copy()
+    summary_df["Subject"] = summary_df["Subject"].map(_normalize_mouse_id)
+    summary_df["Subject Rank"] = summary_df["Subject"].map(rank_dict)
+    summary_df["Agent"] = summary_df["Subject"].map(cagemate_dict)
+    summary_df["Agent Rank"] = summary_df["Agent"].map(rank_dict)
+
+    def classify_relative_rank(row):
+        subj_rank = row["Subject Rank"]
+        agent_rank = row["Agent Rank"]
+        if pd.isna(subj_rank) or pd.isna(agent_rank):
+            return np.nan
+        if agent_rank < subj_rank:
+            return "Higher-ranked agent"
+        if agent_rank > subj_rank:
+            return "Lower-ranked agent"
+        return "Equal-ranked agent"
+
+    summary_df["Relative Rank"] = summary_df.apply(classify_relative_rank, axis=1)
+    summary_df["Rank Difference"] = summary_df["Agent Rank"] - summary_df["Subject Rank"]
+    summary_df["DA"] = summary_df[da_col]
+    summary_df["Bout"] = bout_name
+
+    cols = [
+        "Subject",
+        "Bout",
+        "Agent",
+        "Subject Rank",
+        "Agent Rank",
+        "Relative Rank",
+        "Rank Difference",
+        "First Investigation Duration",
+        "Total Investigation Duration",
+        "DA",
+        "AUC",
+        "Max Peak",
+        "Mean Z-score",
+    ]
+    return summary_df[cols].copy()
+
+
+def plot_home_cage_long_term_da_by_relative_rank(
+    rank_summary_df,
+    da_col="DA",
+    group_col="Relative Rank",
+    group_order=None,
+    group_colors=None,
+    title="Home Cage Long-Term DA by Relative Rank",
+    ylabel="Mean Z-scored ΔF/F during 1st investigation",
+    figsize=(8, 7),
+    ax=None,
+):
+    """
+    Plot long-term first-investigation DA grouped by whether the mapped agent is
+    higher or lower rank than the subject.
+    """
+    plot_df = rank_summary_df.dropna(subset=[group_col, da_col]).copy()
+    if plot_df.empty:
+        raise ValueError("No valid rows remain for relative-rank plotting.")
+
+    if group_order is None:
+        group_order = ["Higher-ranked agent", "Lower-ranked agent", "Equal-ranked agent"]
+    group_order = [g for g in group_order if g in plot_df[group_col].unique()]
+
+    if group_colors is None:
+        group_colors = {
+            "Higher-ranked agent": "#c44e52",
+            "Lower-ranked agent": "#4c72b0",
+            "Equal-ranked agent": "#7f7f7f",
+        }
+
+    created_fig = False
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+        created_fig = True
+    else:
+        fig = ax.figure
+
+    means = []
+    sems = []
+    x_positions = np.arange(len(group_order))
+
+    for idx, group_name in enumerate(group_order):
+        vals = plot_df.loc[plot_df[group_col] == group_name, da_col].dropna().to_numpy(dtype=float)
+        means.append(np.nanmean(vals))
+        sems.append(np.nanstd(vals, ddof=1) / np.sqrt(len(vals)) if len(vals) > 1 else 0)
+
+        jitter = np.linspace(-0.08, 0.08, len(vals)) if len(vals) > 1 else np.array([0.0] * len(vals))
+        ax.scatter(
+            np.full(len(vals), idx) + jitter,
+            vals,
+            s=120,
+            color=group_colors.get(group_name, "gray"),
+            edgecolor="black",
+            linewidth=1.5,
+            alpha=0.95,
+            zorder=3,
+        )
+
+    ax.bar(
+        x_positions,
+        means,
+        yerr=sems,
+        capsize=6,
+        width=0.62,
+        color=[group_colors.get(g, "gray") for g in group_order],
+        edgecolor="black",
+        linewidth=2.5,
+        alpha=0.35,
+        zorder=2,
+    )
+
+    if len(group_order) >= 2:
+        first_vals = plot_df.loc[plot_df[group_col] == group_order[0], da_col].dropna().to_numpy(dtype=float)
+        second_vals = plot_df.loc[plot_df[group_col] == group_order[1], da_col].dropna().to_numpy(dtype=float)
+        if len(first_vals) > 1 and len(second_vals) > 1:
+            _, p_val = ttest_ind(first_vals, second_vals, equal_var=False, nan_policy="omit")
+            ax.text(0.02, 0.96, f"p = {p_val:.3g}", transform=ax.transAxes, va="top", fontsize=15)
+
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(group_order, fontsize=14)
+    ax.set_ylabel(ylabel, fontsize=18)
+    ax.set_title(title, fontsize=20)
+    ax.tick_params(axis="y", labelsize=14)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_linewidth(3)
+    ax.spines["bottom"].set_linewidth(3)
+
+    if created_fig:
+        plt.tight_layout()
+
+    return plot_df, fig, ax
+
+
+def plot_home_cage_long_term_da_vs_rank(
+    rank_summary_df,
+    rank_col="Agent Rank",
+    da_col="DA",
+    title=None,
+    xlabel=None,
+    ylabel="Mean Z-scored ΔF/F during 1st investigation",
+    figsize=(8, 7),
+    ax=None,
+):
+    """
+    Scatter plot and correlation line for long-term home-cage DA vs rank.
+    Use rank_col='Agent Rank' for agent effects or rank_col='Subject Rank' for
+    resident-subject effects.
+    """
+    plot_df = rank_summary_df.dropna(subset=[rank_col, da_col]).copy()
+    if plot_df.empty:
+        raise ValueError("No valid rows remain for rank-correlation plotting.")
+
+    created_fig = False
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+        created_fig = True
+    else:
+        fig = ax.figure
+
+    ax.scatter(
+        plot_df[rank_col],
+        plot_df[da_col],
+        s=150,
+        facecolors="none",
+        edgecolors="#2f2f2f",
+        linewidth=2.2,
+        zorder=3,
+    )
+
+    r_text = "r = ---"
+    p_text = "p = ---"
+    if len(plot_df) > 1 and plot_df[rank_col].nunique() > 1:
+        x_vals = plot_df[rank_col].to_numpy(dtype=float)
+        y_vals = plot_df[da_col].to_numpy(dtype=float)
+        slope, intercept = np.polyfit(x_vals, y_vals, 1)
+        x_fit = np.linspace(np.nanmin(x_vals), np.nanmax(x_vals), 100)
+        ax.plot(x_fit, slope * x_fit + intercept, color="black", linewidth=2.5, linestyle=(0, (8, 6)), zorder=2)
+        r_val, p_val = pearsonr(x_vals, y_vals)
+        r_text = f"r = {r_val:.3f}"
+        p_text = f"p = {p_val:.3g}"
+
+    ax.text(0.04, 0.96, f"{r_text}\n{p_text}\nn = {len(plot_df)} mice", transform=ax.transAxes, va="top", fontsize=15)
+    ax.set_xlabel(xlabel if xlabel else rank_col, fontsize=18)
+    ax.set_ylabel(ylabel, fontsize=18)
+    if title is None:
+        title = f"Home Cage Long-Term DA vs {rank_col}"
+    ax.set_title(title, fontsize=20)
+    ax.set_xticks(sorted(plot_df[rank_col].dropna().unique()))
+    ax.tick_params(axis="both", labelsize=14)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_linewidth(3)
+    ax.spines["bottom"].set_linewidth(3)
+
+    if created_fig:
+        plt.tight_layout()
+
+    return plot_df, fig, ax
+
+
+def plot_home_cage_long_term_da_vs_rank_colored(
+    rank_summary_df,
+    rank_col="Agent Rank",
+    da_col="DA",
+    color_col="Relative Rank",
+    color_order=None,
+    color_map=None,
+    legend_title=None,
+    title=None,
+    xlabel=None,
+    ylabel="Mean Z-scored ΔF/F during 1st investigation",
+    figsize=(8, 7),
+    ax=None,
+):
+    """
+    Scatter plot and correlation line for long-term home-cage DA vs rank, with
+    points color-coded by a grouping column such as 'Relative Rank'.
+    """
+    subset_cols = [rank_col, da_col, color_col]
+    plot_df = rank_summary_df.dropna(subset=subset_cols).copy()
+    if plot_df.empty:
+        raise ValueError("No valid rows remain for colored rank-correlation plotting.")
+
+    created_fig = False
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+        created_fig = True
+    else:
+        fig = ax.figure
+
+    if color_map is None:
+        color_map = {
+            "Higher-ranked agent": "#c44e52",
+            "Lower-ranked agent": "#4c72b0",
+            "Equal-ranked agent": "#7f7f7f",
+        }
+    if color_order is None:
+        color_order = list(dict.fromkeys(plot_df[color_col].tolist()))
+
+    for color_name in color_order:
+        group_df = plot_df[plot_df[color_col] == color_name]
+        if group_df.empty:
+            continue
+        ax.scatter(
+            group_df[rank_col],
+            group_df[da_col],
+            s=150,
+            facecolors="none",
+            edgecolors=color_map.get(color_name, "#2f2f2f"),
+            linewidth=2.2,
+            zorder=3,
+            label=str(color_name),
+        )
+
+    r_text = "r = ---"
+    p_text = "p = ---"
+    if len(plot_df) > 1 and plot_df[rank_col].nunique() > 1:
+        x_vals = plot_df[rank_col].to_numpy(dtype=float)
+        y_vals = plot_df[da_col].to_numpy(dtype=float)
+        slope, intercept = np.polyfit(x_vals, y_vals, 1)
+        x_fit = np.linspace(np.nanmin(x_vals), np.nanmax(x_vals), 100)
+        ax.plot(
+            x_fit,
+            slope * x_fit + intercept,
+            color="black",
+            linewidth=2.5,
+            linestyle=(0, (8, 6)),
+            zorder=2,
+        )
+        r_val, p_val = pearsonr(x_vals, y_vals)
+        r_text = f"r = {r_val:.3f}"
+        p_text = f"p = {p_val:.3g}"
+
+    ax.text(0.04, 0.96, f"{r_text}\n{p_text}\nn = {len(plot_df)} mice", transform=ax.transAxes, va="top", fontsize=15)
+    ax.set_xlabel(xlabel if xlabel else rank_col, fontsize=18)
+    ax.set_ylabel(ylabel, fontsize=18)
+    if title is None:
+        title = f"Home Cage Long-Term DA vs {rank_col}"
+    ax.set_title(title, fontsize=20)
+    ax.set_xticks(sorted(plot_df[rank_col].dropna().unique()))
+    ax.tick_params(axis="both", labelsize=14)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_linewidth(3)
+    ax.spines["bottom"].set_linewidth(3)
+
+    if legend_title is None:
+        legend_title = color_col
+    ax.legend(title=legend_title, fontsize=12, title_fontsize=13, frameon=False)
+
+    if created_fig:
+        plt.tight_layout()
+
+    return plot_df, fig, ax
+
+
+def plot_home_cage_long_term_da_vs_rank_difference(
+    rank_summary_df,
+    diff_col="Rank Difference",
+    da_col="DA",
+    title="Home Cage Long-Term DA by Relative Rank Difference",
+    xlabel="Agent Rank - Subject Rank",
+    ylabel="Mean Z-scored Î”F/F during 1st investigation",
+    figsize=(8, 7),
+    ax=None,
+):
+    """
+    Scatter plot of first-investigation DA against the numeric rank difference
+    between the agent and the subject.
+    """
+    plot_df = rank_summary_df.dropna(subset=[diff_col, da_col]).copy()
+    if plot_df.empty:
+        raise ValueError("No valid rows remain for rank-difference plotting.")
+
+    created_fig = False
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+        created_fig = True
+    else:
+        fig = ax.figure
+
+    ax.scatter(
+        plot_df[diff_col],
+        plot_df[da_col],
+        s=150,
+        facecolors="none",
+        edgecolors="#2f2f2f",
+        linewidth=2.2,
+        zorder=3,
+    )
+
+    r_text = "r = ---"
+    p_text = "p = ---"
+    if len(plot_df) > 1 and plot_df[diff_col].nunique() > 1:
+        x_vals = plot_df[diff_col].to_numpy(dtype=float)
+        y_vals = plot_df[da_col].to_numpy(dtype=float)
+        slope, intercept = np.polyfit(x_vals, y_vals, 1)
+        x_fit = np.linspace(np.nanmin(x_vals), np.nanmax(x_vals), 100)
+        ax.plot(
+            x_fit,
+            slope * x_fit + intercept,
+            color="black",
+            linewidth=2.5,
+            linestyle=(0, (8, 6)),
+            zorder=2,
+        )
+        r_val, p_val = pearsonr(x_vals, y_vals)
+        r_text = f"r = {r_val:.3f}"
+        p_text = f"p = {p_val:.3g}"
+
+    ax.axvline(0, color="#9a9a9a", linewidth=1.8, linestyle="--", zorder=1)
+    ax.text(0.04, 0.96, f"{r_text}\n{p_text}\nn = {len(plot_df)} mice", transform=ax.transAxes, va="top", fontsize=15)
+    ax.set_xlabel(xlabel, fontsize=18)
+    ax.set_ylabel(ylabel, fontsize=18)
+    ax.set_title(title, fontsize=20)
+    ax.set_xticks(sorted(plot_df[diff_col].dropna().unique()))
+    ax.tick_params(axis="both", labelsize=14)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_linewidth(3)
+    ax.spines["bottom"].set_linewidth(3)
+
+    if created_fig:
+        plt.tight_layout()
+
+    return plot_df, fig, ax
+
+
+def plot_home_cage_long_term_da_rank_interaction(
+    rank_summary_df,
+    da_col="DA",
+    subject_rank_col="Subject Rank",
+    agent_rank_col="Agent Rank",
+    title="Home Cage Long-Term DA by Subject Rank x Agent Rank",
+    xlabel="Agent Rank",
+    ylabel="Mean Z-scored Î”F/F during 1st investigation",
+    figsize=(10, 8),
+    ax=None,
+    cmap_name="viridis",
+):
+    """
+    Interaction-style line plot showing mean DA across agent ranks, with one
+    line per subject-rank group.
+    """
+    plot_df = rank_summary_df.dropna(subset=[subject_rank_col, agent_rank_col, da_col]).copy()
+    if plot_df.empty:
+        raise ValueError("No valid rows remain for subject-rank x agent-rank interaction plotting.")
+
+    created_fig = False
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+        created_fig = True
+    else:
+        fig = ax.figure
+
+    grouped = (
+        plot_df.groupby([subject_rank_col, agent_rank_col])[da_col]
+        .agg(mean="mean", count="count", std="std")
+        .reset_index()
+    )
+    grouped["sem"] = grouped.apply(
+        lambda row: row["std"] / np.sqrt(row["count"]) if row["count"] > 1 and pd.notna(row["std"]) else 0,
+        axis=1,
+    )
+
+    subject_ranks = sorted(plot_df[subject_rank_col].dropna().unique())
+    agent_ranks = sorted(plot_df[agent_rank_col].dropna().unique())
+    cmap = cm.get_cmap(cmap_name, len(subject_ranks))
+
+    for idx, subj_rank in enumerate(subject_ranks):
+        subj_df = grouped[grouped[subject_rank_col] == subj_rank].sort_values(agent_rank_col)
+        color = cmap(idx)
+        ax.plot(
+            subj_df[agent_rank_col],
+            subj_df["mean"],
+            marker="o",
+            markersize=9,
+            linewidth=2.5,
+            color=color,
+            label=f"Subject rank {int(subj_rank)}",
+            zorder=3,
+        )
+        ax.errorbar(
+            subj_df[agent_rank_col],
+            subj_df["mean"],
+            yerr=subj_df["sem"],
+            fmt="none",
+            ecolor=color,
+            elinewidth=1.8,
+            capsize=4,
+            zorder=2,
+        )
+
+    ax.set_xlabel(xlabel, fontsize=18)
+    ax.set_ylabel(ylabel, fontsize=18)
+    ax.set_title(title, fontsize=20)
+    ax.set_xticks(agent_ranks)
+    ax.tick_params(axis="both", labelsize=14)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_linewidth(3)
+    ax.spines["bottom"].set_linewidth(3)
+    ax.legend(title="Subject rank", fontsize=13, title_fontsize=14, frameon=False)
+
+    if created_fig:
+        plt.tight_layout()
+
+    return plot_df, grouped, fig, ax
+
+
+def plot_home_cage_first_investigation_vs_total_duration(
+    experiment,
+    cap_acq_st_5min=False,
+    behavior="Investigation",
+    desired_bouts=None,
+    group_col="Agent",
+    da_col="Mean Z-score",
+    title="",
+    xlabel="Mean Z-scored ΔF/F during 1st investigation",
+    ylabel="Total Investigation Duration (s)",
+    group_colors=None,
+    ax=None,
+    save=False,
+    save_name=None,
+    pad_inches=0.1,
+    **plot_kwargs,
+):
+    """
+    Plot first-investigation DA vs total investigation duration for home-cage
+    bouts, grouped by agent identity.
+
+    If ``cap_acq_st_5min`` is True, only ``Short_Term-1`` is trimmed to the
+    first 5 minutes before bout totals are computed.
+    """
+    if desired_bouts is None:
+        desired_bouts = ["Short_Term-1", "Short_Term-2", "Long_Term-1", "Novel-1"]
+
+    if group_colors is None:
+        group_colors = {
+            "Acq-ST": "#1f77b4",
+            "Short Term": "#4f86f7",
+            "Long Term": "#b08b3a",
+            "Novel": "#d948c5",
+        }
+
+    agent_labels = {
+        "Short_Term-1": "Acq-ST",
+        "Short_Term-2": "Short Term",
+        "Long_Term-1": "Long Term",
+        "Novel-1": "Novel",
+    }
+
+    trial_data = get_trial_dataframes(experiment)
+    if cap_acq_st_5min:
+        trial_data = trim_short_term_to_5min(trial_data, short_term_bout="Short_Term-1", max_duration=300)
+
+    summary_df = create_first_investigation_bout_summary_df(
+        trial_data=trial_data,
+        behavior=behavior,
+        desired_bouts=desired_bouts,
+        group_label_map=agent_labels,
+        group_col=group_col,
+    )
+
+    plot_df, fig, ax = plot_first_investigation_da_vs_total_duration(
+        summary_df=summary_df,
+        da_col=da_col,
+        duration_col="Total Investigation Duration",
+        group_col=group_col,
+        group_order=["Acq-ST", "Short Term", "Long Term", "Novel"],
+        group_colors=group_colors,
+        title=title,
+        xlabel=xlabel,
+        ylabel=ylabel,
+        ax=ax,
+        save=save,
+        save_name=save_name,
+        pad_inches=pad_inches,
+        **plot_kwargs,
+    )
+
+    return summary_df, plot_df, fig, ax
+
+
+def plot_home_cage_first_investigation_vs_total_duration_comparison(
+    experiment,
+    behavior="Investigation",
+    desired_bouts=None,
+    da_col="Mean Z-score",
+    group_colors=None,
+    figsize=(18, 7),
+    save=False,
+    save_name=None,
+    pad_inches=0.1,
+    **plot_kwargs,
+):
+    """
+    Plot uncapped vs 5-minute capped Acq-ST home-cage correlations side by side.
+    """
+    fig, axes = plt.subplots(1, 2, figsize=figsize, sharey=True)
+
+    uncapped_summary, uncapped_plot, _, _ = plot_home_cage_first_investigation_vs_total_duration(
+        experiment=experiment,
+        cap_acq_st_5min=False,
+        behavior=behavior,
+        desired_bouts=desired_bouts,
+        da_col=da_col,
+        title="Home Cage: Acq-ST Uncapped",
+        group_colors=group_colors,
+        ax=axes[0],
+        **plot_kwargs,
+    )
+
+    capped_summary, capped_plot, _, _ = plot_home_cage_first_investigation_vs_total_duration(
+        experiment=experiment,
+        cap_acq_st_5min=True,
+        behavior=behavior,
+        desired_bouts=desired_bouts,
+        da_col=da_col,
+        title="Home Cage: Acq-ST Capped at 5 min",
+        group_colors=group_colors,
+        ax=axes[1],
+        **plot_kwargs,
+    )
+
+    plt.tight_layout()
+    if save:
+        if save_name is None:
+            raise ValueError("save_name must be provided if save is True.")
+        plt.savefig(save_name, transparent=True, bbox_inches="tight", pad_inches=pad_inches)
+
+    return {
+        "uncapped_summary": uncapped_summary,
+        "uncapped_plot": uncapped_plot,
+        "capped_summary": capped_summary,
+        "capped_plot": capped_plot,
+        "fig": fig,
+        "axes": axes,
+    }
 
 
 
@@ -339,7 +1158,7 @@ def assign_subject_ranks_to_experiment(experiment, rank_csv_path):
     - rank_csv_path : path to CSV with columns ['Subject', 'Rank']
     """
     # Load ranks
-    rank_df = pd.read_csv(rank_csv_path)
+    rank_df = _load_rank_dataframe(rank_csv_path)
     rank_dict = dict(zip(rank_df['Subject'].str.lower(), rank_df['Rank']))
 
     subjects_assigned = 0
@@ -604,10 +1423,8 @@ def assign_ranks_and_combine_da_metrics(experiment, rank_csv_path):
         combined_df (DataFrame): All behaviors + DA metrics + Rank, with Subject column.
     """
 
-    # Load rank CSV
-    rank_df = pd.read_csv(rank_csv_path)
-    if 'Subject' not in rank_df.columns or 'Rank' not in rank_df.columns:
-        rank_df.columns = ['Subject', 'Rank']  # fallback if no headers
+    # Load rank CSV or DataFrame
+    rank_df = _load_rank_dataframe(rank_csv_path)
     rank_dict = dict(zip(rank_df['Subject'].str.lower(), rank_df['Rank']))
 
     combined_rows = []

@@ -549,6 +549,59 @@ class SleapTrial(Trial):
         return self.features_df
         
 
+    def get_social_proximity_df(self, a_cm: float | None = None, b_cm: float | None = None):
+        """
+        Build a full-frame proximity table for the entire recording.
+
+        Returns one row per original SLEAP frame, including:
+        - frame_idx
+        - time_s
+        - agent_in_subject
+        - subject_in_agent
+        - in_bout_frame
+
+        If social masks have not been computed yet, pass `a_cm` and `b_cm`
+        so they can be generated here.
+        """
+        if not hasattr(self, 'frame_times'):
+            raise RuntimeError("Call load_sleap() before exporting proximity data.")
+
+        has_masks = (
+            hasattr(self, 'mask_agent_in_subject')
+            and hasattr(self, 'mask_subject_in_agent')
+        )
+        if not has_masks:
+            if a_cm is None or b_cm is None:
+                raise RuntimeError(
+                    "Social masks are missing. Run add_social_labels(...) first or "
+                    "pass a_cm and b_cm to get_social_proximity_df(...)."
+                )
+            self.compute_social_ellipse_masks(a_cm, b_cm)
+
+        n_frames = len(self.frame_times)
+        bout_mask = np.zeros(n_frames, dtype=bool)
+        if hasattr(self, "frame_indices"):
+            bout_mask[self.frame_indices] = True
+
+        return pd.DataFrame({
+            'frame_idx': np.arange(n_frames, dtype=int),
+            'time_s': self.frame_times,
+            'agent_in_subject': np.where(self.mask_agent_in_subject, "Yes", "No"),
+            'subject_in_agent': np.where(self.mask_subject_in_agent, "Yes", "No"),
+            'in_bout_frame': np.where(bout_mask, "Yes", "No"),
+        })
+
+    def save_social_proximity_csv(self, out_csv: str, a_cm: float | None = None, b_cm: float | None = None):
+        """
+        Save full-frame proximity labels to CSV.
+
+        This exports every original frame from the SLEAP recording, not just
+        frames retained in `features_df`.
+        """
+        proximity_df = self.get_social_proximity_df(a_cm=a_cm, b_cm=b_cm)
+        proximity_df.to_csv(out_csv, index=False)
+        return proximity_df
+
     def load_video(self, video_path: str):
         """Open the arena video so we can grab raw frames later."""
         self._video = cv2.VideoCapture(video_path)
