@@ -2,6 +2,8 @@
 import sys
 import os
 
+parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.append(parent_dir)
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 sys.path.append(PROJECT_ROOT)
 
@@ -11,6 +13,7 @@ from trial_class import Trial
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
+import pickle
 from scipy.interpolate import interp1d
 from scipy.stats import pearsonr, linregress
 from rtc_extension import RTC 
@@ -19,6 +22,31 @@ from rtc_extension import RTC
 class Reward_Training(RTC):
     def __init__(self, experiment_folder_path, behavior_folder_path):
         super().__init__(experiment_folder_path, behavior_folder_path)
+
+    def save_preprocessed(self, save_path):
+        """
+        Save the current experiment object so processed trials and derived
+        analysis tables can be reused without rerunning the pipeline.
+        """
+        save_path = os.path.abspath(os.fspath(save_path))
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        with open(save_path, "wb") as f:
+            pickle.dump(self, f, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f"Saved Reward_Training object to {save_path}")
+        return save_path
+
+    @classmethod
+    def load_preprocessed(cls, save_path):
+        """Load a previously saved Reward_Training object."""
+        save_path = os.path.abspath(os.fspath(save_path))
+        with open(save_path, "rb") as f:
+            exp = pickle.load(f)
+        if not isinstance(exp, cls):
+            raise TypeError(
+                f"Expected a saved {cls.__name__} object, got {type(exp).__name__}."
+            )
+        print(f"Loaded Reward_Training object from {save_path}")
+        return exp
 
     '''*********************************CREATE DF*************************************'''
     def create_base_df(self, directory_path):
