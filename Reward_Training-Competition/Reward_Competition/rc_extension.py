@@ -9,12 +9,16 @@ from experiment_class import Experiment
 from scipy.stats import pearsonr, linregress, ttest_ind
 from trial_class import Trial
 import math
+import glob
 import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import pandas as pd
 import itertools
+import warnings
+import pickle
 from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.patches import Patch
 
 
 
@@ -22,6 +26,31 @@ from matplotlib.colors import LinearSegmentedColormap
 class Reward_Competition(RTC):
     def __init__(self, experiment_folder_path, behavior_folder_path):
         super().__init__(experiment_folder_path, behavior_folder_path)
+
+    def save_preprocessed(self, save_path):
+        """
+        Save the current experiment object so processed trials and derived
+        analysis tables can be reused without rerunning the pipeline.
+        """
+        save_path = os.path.abspath(os.fspath(save_path))
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
+        with open(save_path, "wb") as f:
+            pickle.dump(self, f, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f"Saved Reward_Competition object to {save_path}")
+        return save_path
+
+    @classmethod
+    def load_preprocessed(cls, save_path):
+        """Load a previously saved Reward_Competition object."""
+        save_path = os.path.abspath(os.fspath(save_path))
+        with open(save_path, "rb") as f:
+            exp = pickle.load(f)
+        if not isinstance(exp, cls):
+            raise TypeError(
+                f"Expected a saved {cls.__name__} object, got {type(exp).__name__}."
+            )
+        print(f"Loaded Reward_Competition object from {save_path}")
+        return exp
 
     """*************************READING CSV AND STORING AS DF**************************"""
     def read_and_merge_manual_scoring(self, csv_file_path):
@@ -611,6 +640,1048 @@ class Reward_Competition(RTC):
         df['Pretrial_Time_Axis'] = tone_t
         df['Pretrial_Zscore']    = tone_z
         return df
+
+    def compute_competitive_bout_probability_trace(
+        self,
+        df: pd.DataFrame = None,
+        cue_col: str = "filtered_sound_cues",
+        comp_col: str = "HVL_Comp",
+        time_window: tuple[float, float] = (-50.0, 55.0),
+        bin_size: float = 1.0,
+        competitive_values=(1,),
+        smoothing_bins: int = 3,
+    ):
+        """
+        Build a cue-aligned probability trace for competitive bouts.
+
+        Because Reward Competition stores competition labels per cue rather than as a
+        continuous second-by-second annotation, this method extends each cue's label
+        forward until the next cue (or session end) and then aligns that piecewise
+        state to every valid tone onset.
+        """
+        if df is None:
+            df = self.da_df
+
+        if cue_col not in df.columns or comp_col not in df.columns:
+            raise KeyError(f"Both '{cue_col}' and '{comp_col}' must exist in the dataframe.")
+
+        if bin_size <= 0:
+            raise ValueError("bin_size must be > 0.")
+
+        start_s, end_s = time_window
+        if end_s <= start_s:
+            raise ValueError("time_window must have end > start.")
+
+        rel_time = np.arange(start_s, end_s + bin_size, bin_size, dtype=float)
+
+        numeric_positive = []
+        string_positive = set()
+        for value in competitive_values:
+            try:
+                numeric_positive.append(float(value))
+            except (TypeError, ValueError):
+                string_positive.add(str(value).strip().lower())
+
+        def _scalar_to_binary(value):
+            if pd.isna(value):
+                return np.nan
+
+            try:
+                numeric_value = float(value)
+            except (TypeError, ValueError):
+                label = str(value).strip().lower()
+                return 1.0 if label in string_positive else 0.0
+
+            if any(np.isclose(numeric_value, target) for target in numeric_positive):
+                return 1.0
+            return 0.0
+
+        aligned_rows = []
+        contributing_sessions = 0
+
+        for _, row in df.iterrows():
+            raw_cues = row.get(cue_col, [])
+            raw_states = row.get(comp_col, [])
+
+            cues = np.asarray(raw_cues if isinstance(raw_cues, (list, np.ndarray)) else [], dtype=float)
+            if cues.size == 0:
+                continue
+
+            states_list = raw_states if isinstance(raw_states, (list, np.ndarray)) else []
+            n_pairs = min(len(cues), len(states_list))
+            if n_pairs == 0:
+                continue
+
+            cues = cues[:n_pairs]
+            states = np.asarray([_scalar_to_binary(value) for value in states_list[:n_pairs]], dtype=float)
+
+            valid_cue_mask = np.isfinite(cues)
+            if not np.any(valid_cue_mask):
+                continue
+
+            cues = cues[valid_cue_mask]
+            states = states[valid_cue_mask]
+
+            trial_obj = row.get("trial", None)
+            timestamps = np.asarray(getattr(trial_obj, "timestamps", []), dtype=float)
+            if timestamps.size > 0:
+                session_start = float(np.nanmin(timestamps))
+                session_end = float(np.nanmax(timestamps))
+            else:
+                session_start = float(np.nanmin(cues))
+                session_end = float(np.nanmax(cues))
+
+            valid_anchor_mask = np.isfinite(states)
+            if not np.any(valid_anchor_mask):
+                continue
+
+            contributing_sessions += 1
+
+            for anchor_cue in cues[valid_anchor_mask]:
+                absolute_times = anchor_cue + rel_time
+                interval_idx = np.searchsorted(cues, absolute_times, side="right") - 1
+
+                sample = np.full(rel_time.shape, np.nan, dtype=float)
+                in_bounds = (
+                    (interval_idx >= 0)
+                    & (absolute_times >= session_start)
+                    & (absolute_times <= session_end)
+                )
+                if np.any(in_bounds):
+                    sample[in_bounds] = states[interval_idx[in_bounds]]
+
+                aligned_rows.append(sample)
+
+        if not aligned_rows:
+            raise ValueError("No valid cue-aligned competitive bouts were found for plotting.")
+
+        aligned = np.vstack(aligned_rows)
+        proportion_active = np.nanmean(aligned, axis=0)
+        percent_active = proportion_active * 100.0
+        contributing_n = np.sum(np.isfinite(aligned), axis=0)
+
+        if aligned.shape[0] > 1:
+            sem = np.nanstd(aligned, axis=0, ddof=1) / np.sqrt(np.maximum(contributing_n, 1))
+        else:
+            sem = np.full(rel_time.shape, np.nan, dtype=float)
+
+        percent_sem = sem * 100.0
+
+        if smoothing_bins and smoothing_bins > 1:
+            proportion_active = (
+                pd.Series(proportion_active)
+                .rolling(window=int(smoothing_bins), center=True, min_periods=1)
+                .mean()
+                .to_numpy()
+            )
+            percent_active = proportion_active * 100.0
+
+        summary_df = pd.DataFrame(
+            {
+                "time_s": rel_time,
+                "proportion_active": proportion_active,
+                "percent_active": percent_active,
+                "sem": sem,
+                "percent_sem": percent_sem,
+                "n_contributing": contributing_n,
+            }
+        )
+
+        return summary_df, aligned, {
+            "n_trials": int(aligned.shape[0]),
+            "n_sessions": int(contributing_sessions),
+            "cue_col": cue_col,
+            "comp_col": comp_col,
+        }
+
+    def plot_competitive_bout_probability_over_session(
+        self,
+        df: pd.DataFrame = None,
+        cue_col: str = "filtered_sound_cues",
+        comp_col: str = "HVL_Comp",
+        time_window: tuple[float, float] = (-50.0, 55.0),
+        bin_size: float = 1.0,
+        competitive_values=(1,),
+        smoothing_bins: int = 3,
+        tone_window: tuple[float, float] = (0.0, 10.0),
+        reward_window: tuple[float, float] = (4.0, 6.0),
+        figsize: tuple = (5.6, 3.0),
+        trace_color: str = "#222222",
+        trace_shadow_color: str = "#8A8A8A",
+        tone_color: str = "#F4A300",
+        reward_color: str = "#C8102E",
+        y_mode: str = "proportion",
+        ylabel: str = None,
+        title: str = None,
+        ylim: tuple = (0.2, 0.8),
+        ax=None,
+        save_path: str = None,
+    ):
+        """
+        Plot the cue-aligned competitive-bout probability trace in the same style
+        as the Home Cage session-duration plot.
+        """
+        summary_df, aligned, meta = self.compute_competitive_bout_probability_trace(
+            df=df,
+            cue_col=cue_col,
+            comp_col=comp_col,
+            time_window=time_window,
+            bin_size=bin_size,
+            competitive_values=competitive_values,
+            smoothing_bins=smoothing_bins,
+        )
+
+        if ax is None:
+            _, ax = plt.subplots(figsize=figsize)
+
+        if tone_window is not None:
+            ax.axvspan(
+                tone_window[0],
+                tone_window[1],
+                facecolor=tone_color,
+                edgecolor=tone_color,
+                linestyle="--",
+                linewidth=1.2,
+                alpha=0.35,
+                zorder=0,
+            )
+
+        if reward_window is not None:
+            ax.axvspan(
+                reward_window[0],
+                reward_window[1],
+                facecolor=reward_color,
+                edgecolor=reward_color,
+                alpha=0.55,
+                zorder=1,
+            )
+
+        if y_mode == "proportion":
+            y_col = "proportion_active"
+            default_ylabel = "Competitive bout active"
+        elif y_mode == "percent":
+            y_col = "percent_active"
+            default_ylabel = "% competitive bout active"
+        else:
+            raise ValueError("y_mode must be either 'proportion' or 'percent'.")
+
+        x = summary_df["time_s"].to_numpy()
+        y = summary_df[y_col].to_numpy()
+
+        ax.plot(x, y, color=trace_shadow_color, linewidth=3.8, alpha=0.45, zorder=2)
+        ax.plot(x, y, color=trace_color, linewidth=1.8, zorder=3)
+
+        ax.set_xlabel("Time relative to tone onset (s)", fontsize=11)
+        ax.set_ylabel(ylabel or default_ylabel, fontsize=11)
+        if title:
+            ax.set_title(title, fontsize=12)
+        if ylim is not None:
+            ax.set_ylim(*ylim)
+
+        ax.set_xlim(time_window[0], time_window[1])
+        xticks = np.arange(np.ceil(time_window[0] / 10) * 10, time_window[1] + 1, 10)
+        ax.set_xticks(xticks)
+        ax.set_xticklabels([f"{int(tick)}" for tick in xticks], rotation=35, ha="right")
+
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+        legend_handles = []
+        if tone_window is not None:
+            legend_handles.append(Patch(facecolor=tone_color, label="Tone window"))
+        if reward_window is not None:
+            legend_handles.append(Patch(facecolor=reward_color, label="Reward window"))
+        if legend_handles:
+            ax.legend(
+                handles=legend_handles,
+                title=f"trials={meta['n_trials']}",
+                loc="upper right",
+                frameon=True,
+                fontsize=9,
+                title_fontsize=9,
+            )
+
+        if save_path:
+            ax.figure.savefig(save_path, dpi=300, bbox_inches="tight")
+
+        return ax, summary_df, aligned
+
+    def compute_binned_competitive_bout_activity(
+        self,
+        df: pd.DataFrame = None,
+        cue_col: str = "filtered_sound_cues",
+        comp_col: str = "HVL_Comp",
+        time_window: tuple[float, float] = (-50.0, 55.0),
+        sample_step_s: float = 1.0,
+        bin_width_s: float = 5.0,
+        competitive_values=(1,),
+    ):
+        """
+        Create per-trial 0/1 vectors across time bins, then average across trials.
+
+        For each aligned trial and each time bin:
+        - 1 if a competitive bout is active anywhere in that bin
+        - 0 if the bin is observed and no competitive bout is active
+        - NaN if the bin is entirely unobserved for that trial
+        """
+        if bin_width_s <= 0:
+            raise ValueError("bin_width_s must be > 0.")
+        if sample_step_s <= 0:
+            raise ValueError("sample_step_s must be > 0.")
+        if bin_width_s < sample_step_s:
+            warnings.warn(
+                "bin_width_s is smaller than sample_step_s, so many bins may contain no samples. "
+                "Use sample_step_s <= bin_width_s for meaningful binning."
+            )
+
+        trace_summary_df, aligned, meta = self.compute_competitive_bout_probability_trace(
+            df=df,
+            cue_col=cue_col,
+            comp_col=comp_col,
+            time_window=time_window,
+            bin_size=sample_step_s,
+            competitive_values=competitive_values,
+            smoothing_bins=1,
+        )
+
+        rel_time = trace_summary_df["time_s"].to_numpy(dtype=float)
+        start_s, end_s = time_window
+
+        bin_edges = np.arange(start_s, end_s + bin_width_s, bin_width_s, dtype=float)
+        if bin_edges[-1] < end_s:
+            bin_edges = np.append(bin_edges, end_s)
+
+        n_bins = len(bin_edges) - 1
+        binned_trials = np.full((aligned.shape[0], n_bins), np.nan, dtype=float)
+
+        for bin_idx in range(n_bins):
+            left = bin_edges[bin_idx]
+            right = bin_edges[bin_idx + 1]
+            if bin_idx == n_bins - 1:
+                mask = (rel_time >= left) & (rel_time <= right)
+            else:
+                mask = (rel_time >= left) & (rel_time < right)
+
+            if not np.any(mask):
+                continue
+
+            bin_slice = aligned[:, mask]
+            observed_mask = np.any(np.isfinite(bin_slice), axis=1)
+            active_mask = np.any(bin_slice == 1, axis=1)
+
+            binned_trials[observed_mask, bin_idx] = active_mask[observed_mask].astype(float)
+
+        n_contributing_trials = np.sum(np.isfinite(binned_trials), axis=0)
+        proportion_active = np.nanmean(binned_trials, axis=0)
+        percent_active = proportion_active * 100.0
+
+        if binned_trials.shape[0] > 1:
+            sem = np.nanstd(binned_trials, axis=0, ddof=1) / np.sqrt(np.maximum(n_contributing_trials, 1))
+        else:
+            sem = np.full(n_bins, np.nan, dtype=float)
+
+        percent_sem = sem * 100.0
+        bin_centers = bin_edges[:-1] + np.diff(bin_edges) / 2.0
+
+        binned_summary_df = pd.DataFrame(
+            {
+                "bin_start_s": bin_edges[:-1],
+                "bin_end_s": bin_edges[1:],
+                "bin_center_s": bin_centers,
+                "bin_width_s": np.diff(bin_edges),
+                "proportion_active": proportion_active,
+                "percent_active": percent_active,
+                "sem": sem,
+                "percent_sem": percent_sem,
+                "n_contributing_trials": n_contributing_trials,
+            }
+        )
+
+        meta = dict(meta)
+        meta["bin_width_s"] = float(bin_width_s)
+        meta["sample_step_s"] = float(sample_step_s)
+
+        return binned_summary_df, binned_trials, aligned, meta
+
+    def plot_binned_competitive_bout_activity(
+        self,
+        df: pd.DataFrame = None,
+        cue_col: str = "filtered_sound_cues",
+        comp_col: str = "HVL_Comp",
+        time_window: tuple[float, float] = (-50.0, 55.0),
+        sample_step_s: float = 1.0,
+        bin_width_s: float = 5.0,
+        competitive_values=(1,),
+        y_mode: str = "percent",
+        plot_style: str = "step",
+        tone_window: tuple[float, float] = (0.0, 10.0),
+        reward_window: tuple[float, float] = (4.0, 6.0),
+        figsize: tuple = (5.8, 3.2),
+        trace_color: str = "#222222",
+        trace_shadow_color: str = "#8A8A8A",
+        tone_color: str = "#F4A300",
+        reward_color: str = "#C8102E",
+        ylabel: str = None,
+        title: str = None,
+        ylim: tuple = None,
+        ax=None,
+        save_path: str = None,
+    ):
+        """
+        Plot binarized competitive-bout activity averaged across aligned trials.
+        """
+        summary_df, binned_trials, aligned, meta = self.compute_binned_competitive_bout_activity(
+            df=df,
+            cue_col=cue_col,
+            comp_col=comp_col,
+            time_window=time_window,
+            sample_step_s=sample_step_s,
+            bin_width_s=bin_width_s,
+            competitive_values=competitive_values,
+        )
+
+        if ax is None:
+            _, ax = plt.subplots(figsize=figsize)
+
+        if tone_window is not None:
+            ax.axvspan(
+                tone_window[0],
+                tone_window[1],
+                facecolor=tone_color,
+                edgecolor=tone_color,
+                linestyle="--",
+                linewidth=1.2,
+                alpha=0.35,
+                zorder=0,
+            )
+
+        if reward_window is not None:
+            ax.axvspan(
+                reward_window[0],
+                reward_window[1],
+                facecolor=reward_color,
+                edgecolor=reward_color,
+                alpha=0.55,
+                zorder=1,
+            )
+
+        if y_mode == "proportion":
+            y_col = "proportion_active"
+            default_ylabel = "Fraction of trials with comp bout active"
+        elif y_mode == "percent":
+            y_col = "percent_active"
+            default_ylabel = "% trials with comp bout active"
+        else:
+            raise ValueError("y_mode must be either 'proportion' or 'percent'.")
+
+        x = summary_df["bin_center_s"].to_numpy()
+        y = summary_df[y_col].to_numpy()
+        bin_width = float(summary_df["bin_width_s"].iloc[0]) if len(summary_df) else bin_width_s
+
+        if plot_style == "bar":
+            ax.bar(x, y, width=bin_width * 0.9, color=trace_shadow_color, edgecolor=trace_color, linewidth=1.2, zorder=2)
+        elif plot_style == "step":
+            ax.step(x, y, where="mid", color=trace_shadow_color, linewidth=4.0, alpha=0.35, zorder=2)
+            ax.step(x, y, where="mid", color=trace_color, linewidth=2.0, zorder=3)
+            ax.plot(x, y, "o", color=trace_color, markersize=4, zorder=4)
+        else:
+            raise ValueError("plot_style must be either 'step' or 'bar'.")
+
+        ax.set_xlabel("Time relative to tone onset (s)", fontsize=11)
+        ax.set_ylabel(ylabel or default_ylabel, fontsize=11)
+        if title:
+            ax.set_title(title, fontsize=12)
+        if ylim is not None:
+            ax.set_ylim(*ylim)
+
+        ax.set_xlim(time_window[0], time_window[1])
+        xticks = np.arange(np.ceil(time_window[0] / 10) * 10, time_window[1] + 1, 10)
+        ax.set_xticks(xticks)
+        ax.set_xticklabels([f"{int(tick)}" for tick in xticks], rotation=35, ha="right")
+
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+        ax.legend(
+            handles=[
+                Patch(facecolor=tone_color, label="Tone window"),
+                Patch(facecolor=reward_color, label="Reward window"),
+            ],
+            title=f"trials={meta['n_trials']}, bins={meta['bin_width_s']:.0f}s",
+            loc="upper right",
+            frameon=True,
+            fontsize=9,
+            title_fontsize=9,
+        )
+
+        if save_path:
+            ax.figure.savefig(save_path, dpi=300, bbox_inches="tight")
+
+        return ax, summary_df, binned_trials, aligned
+
+    def compute_session_trial_competitive_bout_metric(
+        self,
+        df: pd.DataFrame = None,
+        cue_col: str = "filtered_sound_cues",
+        event_col: str = "filtered_winner_array",
+        deduplicate_sessions: bool = True,
+        session_id_col: str = "shared_session_id",
+    ):
+        """
+        Treat each tone-to-next-tone interval as one full trial, including ITI.
+
+        For each session and trial index:
+        - comp_bout_count = 1 if any competitive bout is coded for that trial
+          interval, otherwise 0
+        - comp_bout_frequency_hz = count / interval_duration_s
+        - comp_bout_frequency_per_min = count / interval_duration_min
+
+        Notes
+        -----
+        With the current RC table structure, `event_col` is interpreted as one
+        competition code per trial interval. So this produces a 0/1 count per
+        interval. If later you add actual multiple bout timestamps per interval,
+        this function can be extended to count more than one bout.
+        """
+        if df is None:
+            df = self.da_df.copy()
+        else:
+            df = df.copy()
+
+        required_cols = ["file name", cue_col, event_col]
+        missing_cols = [col for col in required_cols if col not in df.columns]
+        if missing_cols:
+            raise KeyError(f"Missing required columns: {missing_cols}")
+
+        def _shared_session_id(file_name):
+            if pd.isna(file_name):
+                return None
+            parts = str(file_name).split("-", 1)
+            return parts[1] if len(parts) > 1 else str(file_name)
+
+        def _as_list(x):
+            if isinstance(x, np.ndarray):
+                return x.tolist()
+            return x if isinstance(x, list) else []
+
+        def _event_to_count(value):
+            if pd.isna(value):
+                return 0.0
+            if isinstance(value, str):
+                clean = value.strip().lower()
+                if clean in {"", "nan", "none", "tangle"}:
+                    return 0.0
+                return 1.0
+            return 1.0
+
+        df[session_id_col] = df["file name"].map(_shared_session_id)
+
+        if deduplicate_sessions:
+            df = df.drop_duplicates(subset=[session_id_col], keep="first").reset_index(drop=True)
+
+        trial_rows = []
+
+        for _, row in df.iterrows():
+            session_id = row[session_id_col]
+            file_name = row["file name"]
+            cues = np.asarray(_as_list(row.get(cue_col, [])), dtype=float)
+            events = _as_list(row.get(event_col, []))
+
+            cues = cues[np.isfinite(cues)]
+            if len(cues) < 2:
+                continue
+
+            n_trials = min(len(cues) - 1, len(events))
+            if n_trials <= 0:
+                continue
+
+            for trial_idx in range(n_trials):
+                start_s = float(cues[trial_idx])
+                end_s = float(cues[trial_idx + 1])
+                duration_s = end_s - start_s
+                if not np.isfinite(duration_s) or duration_s <= 0:
+                    continue
+
+                count = float(_event_to_count(events[trial_idx]))
+                frequency_hz = count / duration_s
+                frequency_per_min = count / (duration_s / 60.0)
+
+                trial_rows.append(
+                    {
+                        session_id_col: session_id,
+                        "file name": file_name,
+                        "trial_number": int(trial_idx + 1),
+                        "trial_start_s": start_s,
+                        "trial_end_s": end_s,
+                        "trial_duration_s": duration_s,
+                        "comp_bout_count": count,
+                        "comp_bout_frequency_hz": frequency_hz,
+                        "comp_bout_frequency_per_min": frequency_per_min,
+                    }
+                )
+
+        trial_df = pd.DataFrame(trial_rows)
+        if trial_df.empty:
+            raise ValueError("No valid tone-to-tone trial intervals were found.")
+
+        def _sem(x):
+            x = np.asarray(x, dtype=float)
+            x = x[np.isfinite(x)]
+            if len(x) <= 1:
+                return np.nan
+            return np.std(x, ddof=1) / np.sqrt(len(x))
+
+        summary_df = (
+            trial_df.groupby("trial_number", as_index=False)
+            .agg(
+                mean_comp_bout_count=("comp_bout_count", "mean"),
+                sem_comp_bout_count=("comp_bout_count", _sem),
+                mean_comp_bout_frequency_hz=("comp_bout_frequency_hz", "mean"),
+                sem_comp_bout_frequency_hz=("comp_bout_frequency_hz", _sem),
+                mean_comp_bout_frequency_per_min=("comp_bout_frequency_per_min", "mean"),
+                sem_comp_bout_frequency_per_min=("comp_bout_frequency_per_min", _sem),
+                mean_trial_duration_s=("trial_duration_s", "mean"),
+                n_sessions=("comp_bout_count", "count"),
+            )
+        )
+
+        return summary_df, trial_df
+
+    def plot_session_trial_competitive_bout_metric(
+        self,
+        df: pd.DataFrame = None,
+        cue_col: str = "filtered_sound_cues",
+        event_col: str = "filtered_winner_array",
+        metric: str = "frequency_per_min",
+        deduplicate_sessions: bool = True,
+        figsize: tuple = (6.2, 3.6),
+        color: str = "#222222",
+        error_color: str = "#8A8A8A",
+        marker: str = "o",
+        linewidth: float = 2.0,
+        capsize: float = 3.0,
+        ylabel: str = None,
+        title: str = None,
+        ylim: tuple = None,
+        ax=None,
+        save_path: str = None,
+    ):
+        """
+        Plot session-averaged competitive-bout count or frequency by trial number.
+        """
+        summary_df, trial_df = self.compute_session_trial_competitive_bout_metric(
+            df=df,
+            cue_col=cue_col,
+            event_col=event_col,
+            deduplicate_sessions=deduplicate_sessions,
+        )
+
+        if metric == "count":
+            y_col = "mean_comp_bout_count"
+            err_col = "sem_comp_bout_count"
+            default_ylabel = "Competitive bout count"
+        elif metric == "frequency_hz":
+            y_col = "mean_comp_bout_frequency_hz"
+            err_col = "sem_comp_bout_frequency_hz"
+            default_ylabel = "Competitive bout frequency (Hz)"
+        elif metric == "frequency_per_min":
+            y_col = "mean_comp_bout_frequency_per_min"
+            err_col = "sem_comp_bout_frequency_per_min"
+            default_ylabel = "Competitive bout frequency (/min)"
+        else:
+            raise ValueError("metric must be 'count', 'frequency_hz', or 'frequency_per_min'.")
+
+        if ax is None:
+            _, ax = plt.subplots(figsize=figsize)
+
+        x = summary_df["trial_number"].to_numpy()
+        y = summary_df[y_col].to_numpy()
+        yerr = summary_df[err_col].to_numpy()
+
+        ax.plot(x, y, color=error_color, linewidth=linewidth + 2, alpha=0.25, zorder=1)
+        ax.errorbar(
+            x,
+            y,
+            yerr=yerr,
+            color=color,
+            ecolor=error_color,
+            linewidth=linewidth,
+            marker=marker,
+            markersize=5,
+            capsize=capsize,
+            zorder=3,
+        )
+
+        ax.set_xlabel("Trial number", fontsize=11)
+        ax.set_ylabel(ylabel or default_ylabel, fontsize=11)
+        if title:
+            ax.set_title(title, fontsize=12)
+        if ylim is not None:
+            ax.set_ylim(*ylim)
+
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+        if save_path:
+            ax.figure.savefig(save_path, dpi=300, bbox_inches="tight")
+
+        return ax, summary_df, trial_df
+
+    def load_competition_bout_csv_folder(
+        self,
+        csv_folder: str,
+        behavior_name: str = "Competition Bout",
+        merge_touching_bouts: bool = True,
+        session_id_col: str = "shared_session_id",
+    ):
+        """
+        Load timestamped competition bouts from a folder of BORIS-style CSVs.
+
+        Files are grouped by shared recording/session id so duplicated subject-level
+        exports can be collapsed into one session-level set of competitive bouts.
+        Overlapping bouts across files are merged to avoid double counting.
+        """
+        csv_paths = sorted(glob.glob(os.path.join(csv_folder, "*.csv")))
+        if not csv_paths:
+            raise FileNotFoundError(f"No CSV files found in: {csv_folder}")
+
+        all_rows = []
+
+        def _shared_session_id(file_stem):
+            parts = str(file_stem).split("-", 1)
+            return parts[1] if len(parts) > 1 else str(file_stem)
+
+        for path in csv_paths:
+            try:
+                bout_df = pd.read_csv(path)
+            except Exception:
+                continue
+
+            if "Behavior" not in bout_df.columns or "Start (s)" not in bout_df.columns or "Stop (s)" not in bout_df.columns:
+                continue
+
+            bout_df = bout_df.copy()
+            bout_df["Start (s)"] = pd.to_numeric(bout_df["Start (s)"], errors="coerce")
+            bout_df["Stop (s)"] = pd.to_numeric(bout_df["Stop (s)"], errors="coerce")
+            bout_df = bout_df[
+                (bout_df["Behavior"].astype(str).str.strip() == behavior_name)
+                & np.isfinite(bout_df["Start (s)"])
+                & np.isfinite(bout_df["Stop (s)"])
+                & (bout_df["Stop (s)"] > bout_df["Start (s)"])
+            ].copy()
+
+            if bout_df.empty:
+                continue
+
+            file_stem = os.path.splitext(os.path.basename(path))[0]
+            bout_df["csv_file_name"] = file_stem
+            bout_df[session_id_col] = _shared_session_id(file_stem)
+            all_rows.append(bout_df)
+
+        if not all_rows:
+            raise ValueError(f"No '{behavior_name}' rows with valid timestamps were found in {csv_folder}.")
+
+        raw_bout_df = pd.concat(all_rows, ignore_index=True)
+
+        merged_rows = []
+        for session_id, group in raw_bout_df.groupby(session_id_col):
+            intervals = (
+                group[["Start (s)", "Stop (s)"]]
+                .sort_values(["Start (s)", "Stop (s)"])
+                .to_numpy(dtype=float)
+            )
+
+            if len(intervals) == 0:
+                continue
+
+            current_start, current_stop = intervals[0]
+            merged_count = 1
+
+            for start_s, stop_s in intervals[1:]:
+                overlaps = start_s <= current_stop if merge_touching_bouts else start_s < current_stop
+                if overlaps:
+                    current_stop = max(current_stop, stop_s)
+                    merged_count += 1
+                else:
+                    merged_rows.append(
+                        {
+                            session_id_col: session_id,
+                            "merged_bout_start_s": float(current_start),
+                            "merged_bout_stop_s": float(current_stop),
+                            "merged_bout_duration_s": float(current_stop - current_start),
+                            "merged_source_rows": int(merged_count),
+                        }
+                    )
+                    current_start, current_stop = start_s, stop_s
+                    merged_count = 1
+
+            merged_rows.append(
+                {
+                    session_id_col: session_id,
+                    "merged_bout_start_s": float(current_start),
+                    "merged_bout_stop_s": float(current_stop),
+                    "merged_bout_duration_s": float(current_stop - current_start),
+                    "merged_source_rows": int(merged_count),
+                }
+            )
+
+        merged_bout_df = pd.DataFrame(merged_rows)
+        if merged_bout_df.empty:
+            raise ValueError("No merged competitive bouts could be constructed from the CSV folder.")
+
+        return raw_bout_df, merged_bout_df
+
+    def compute_csv_session_trial_competitive_bout_metric(
+        self,
+        csv_folder: str,
+        df: pd.DataFrame = None,
+        cue_col: str = "filtered_sound_cues",
+        precomp_col: str = "HVL_PreComp",
+        comp_col: str = "HVL_Comp",
+        pretrial_window: tuple[float, float] = (-10.0, 0.0),
+        behavior_name: str = "Competition Bout",
+        include_pretrial: bool = True,
+        count_mode: str = "start",
+        session_id_col: str = "shared_session_id",
+    ):
+        """
+        Compute session-level competitive bout count/frequency by trial number using
+        timestamped bouts from full-data CSVs.
+
+        Window types:
+        - `trial`: tone_i -> tone_{i+1}` including the ITI
+        - `pretrial`: fixed window before tone_i, default -10 -> 0 s
+
+        Counts are based on merged competitive bouts collapsed across subject and
+        social-agent CSV exports for the same recording session.
+        """
+        if df is None:
+            if not hasattr(self, "da_df") or self.da_df is None or len(self.da_df) == 0:
+                raise ValueError("No da_df available. Run the RC preprocessing pipeline first.")
+            df = self.da_df.copy()
+        else:
+            df = df.copy()
+
+        raw_bout_df, merged_bout_df = self.load_competition_bout_csv_folder(
+            csv_folder=csv_folder,
+            behavior_name=behavior_name,
+            session_id_col=session_id_col,
+        )
+
+        def _shared_session_id(file_name):
+            if pd.isna(file_name):
+                return None
+            parts = str(file_name).split("-", 1)
+            return parts[1] if len(parts) > 1 else str(file_name)
+
+        def _as_list(x):
+            if isinstance(x, np.ndarray):
+                return x.tolist()
+            return x if isinstance(x, list) else []
+
+        df[session_id_col] = df["file name"].map(_shared_session_id)
+        session_df = df.drop_duplicates(subset=[session_id_col], keep="first").reset_index(drop=True)
+
+        merged_sessions = set(merged_bout_df[session_id_col].dropna().unique())
+        session_df = session_df[session_df[session_id_col].isin(merged_sessions)].reset_index(drop=True)
+
+        if session_df.empty:
+            raise ValueError("No overlap was found between da_df sessions and the CSV folder sessions.")
+
+        def _count_bouts_in_window(bout_group, start_s, end_s):
+            if count_mode == "start":
+                mask = (bout_group["merged_bout_start_s"] >= start_s) & (bout_group["merged_bout_start_s"] < end_s)
+            elif count_mode == "overlap":
+                mask = (bout_group["merged_bout_stop_s"] > start_s) & (bout_group["merged_bout_start_s"] < end_s)
+            else:
+                raise ValueError("count_mode must be 'start' or 'overlap'.")
+            return float(mask.sum())
+
+        metric_rows = []
+
+        for _, row in session_df.iterrows():
+            session_id = row[session_id_col]
+            file_name = row["file name"]
+            cues = np.asarray(_as_list(row.get(cue_col, [])), dtype=float)
+            cues = cues[np.isfinite(cues)]
+            if len(cues) == 0:
+                continue
+
+            bout_group = merged_bout_df[merged_bout_df[session_id_col] == session_id].copy()
+            if bout_group.empty:
+                continue
+
+            precomp_labels = _as_list(row.get(precomp_col, []))
+            comp_labels = _as_list(row.get(comp_col, []))
+
+            if include_pretrial:
+                n_pre = min(len(cues), len(precomp_labels)) if len(precomp_labels) > 0 else len(cues)
+                for trial_idx in range(n_pre):
+                    tone_s = float(cues[trial_idx])
+                    start_s = tone_s + float(pretrial_window[0])
+                    end_s = tone_s + float(pretrial_window[1])
+                    duration_s = end_s - start_s
+                    if duration_s <= 0:
+                        continue
+
+                    count = _count_bouts_in_window(bout_group, start_s, end_s)
+                    metric_rows.append(
+                        {
+                            session_id_col: session_id,
+                            "file name": file_name,
+                            "window_type": "pretrial",
+                            "trial_number": int(trial_idx + 1),
+                            "window_start_s": start_s,
+                            "window_end_s": end_s,
+                            "window_duration_s": duration_s,
+                            "comp_bout_count": count,
+                            "comp_bout_frequency_hz": count / duration_s,
+                            "comp_bout_frequency_per_min": count / (duration_s / 60.0),
+                        }
+                    )
+
+            if len(cues) >= 2:
+                n_trial = min(len(cues) - 1, len(comp_labels)) if len(comp_labels) > 0 else len(cues) - 1
+                for trial_idx in range(n_trial):
+                    start_s = float(cues[trial_idx])
+                    end_s = float(cues[trial_idx + 1])
+                    duration_s = end_s - start_s
+                    if duration_s <= 0:
+                        continue
+
+                    count = _count_bouts_in_window(bout_group, start_s, end_s)
+                    metric_rows.append(
+                        {
+                            session_id_col: session_id,
+                            "file name": file_name,
+                            "window_type": "trial",
+                            "trial_number": int(trial_idx + 1),
+                            "window_start_s": start_s,
+                            "window_end_s": end_s,
+                            "window_duration_s": duration_s,
+                            "comp_bout_count": count,
+                            "comp_bout_frequency_hz": count / duration_s,
+                            "comp_bout_frequency_per_min": count / (duration_s / 60.0),
+                        }
+                    )
+
+        metric_df = pd.DataFrame(metric_rows)
+        if metric_df.empty:
+            raise ValueError("No trial or pretrial competitive bout metrics could be computed from the CSV folder.")
+
+        def _sem(x):
+            x = np.asarray(x, dtype=float)
+            x = x[np.isfinite(x)]
+            if len(x) <= 1:
+                return np.nan
+            return np.std(x, ddof=1) / np.sqrt(len(x))
+
+        summary_df = (
+            metric_df.groupby(["window_type", "trial_number"], as_index=False)
+            .agg(
+                mean_comp_bout_count=("comp_bout_count", "mean"),
+                sem_comp_bout_count=("comp_bout_count", _sem),
+                mean_comp_bout_frequency_hz=("comp_bout_frequency_hz", "mean"),
+                sem_comp_bout_frequency_hz=("comp_bout_frequency_hz", _sem),
+                mean_comp_bout_frequency_per_min=("comp_bout_frequency_per_min", "mean"),
+                sem_comp_bout_frequency_per_min=("comp_bout_frequency_per_min", _sem),
+                mean_window_duration_s=("window_duration_s", "mean"),
+                n_sessions=("comp_bout_count", "count"),
+            )
+        )
+
+        return summary_df, metric_df, raw_bout_df, merged_bout_df
+
+    def plot_csv_session_trial_competitive_bout_metric(
+        self,
+        csv_folder: str,
+        df: pd.DataFrame = None,
+        cue_col: str = "filtered_sound_cues",
+        precomp_col: str = "HVL_PreComp",
+        comp_col: str = "HVL_Comp",
+        pretrial_window: tuple[float, float] = (-10.0, 0.0),
+        behavior_name: str = "Competition Bout",
+        window_type: str = "trial",
+        metric: str = "frequency_per_min",
+        include_pretrial: bool = True,
+        count_mode: str = "start",
+        figsize: tuple = (6.4, 3.8),
+        color: str = "#222222",
+        error_color: str = "#8A8A8A",
+        marker: str = "o",
+        linewidth: float = 2.0,
+        capsize: float = 3.0,
+        ylabel: str = None,
+        title: str = None,
+        ylim: tuple = None,
+        ax=None,
+    ):
+        """
+        Plot session-averaged competitive bout count/frequency by trial number
+        using timestamped competition-bout CSVs.
+        """
+        summary_df, metric_df, raw_bout_df, merged_bout_df = self.compute_csv_session_trial_competitive_bout_metric(
+            csv_folder=csv_folder,
+            df=df,
+            cue_col=cue_col,
+            precomp_col=precomp_col,
+            comp_col=comp_col,
+            pretrial_window=pretrial_window,
+            behavior_name=behavior_name,
+            include_pretrial=include_pretrial,
+            count_mode=count_mode,
+        )
+
+        plot_df = summary_df[summary_df["window_type"] == window_type].copy()
+        if plot_df.empty:
+            raise ValueError(f"No rows found for window_type='{window_type}'.")
+
+        if metric == "count":
+            y_col = "mean_comp_bout_count"
+            err_col = "sem_comp_bout_count"
+            default_ylabel = "Competitive bout count"
+        elif metric == "frequency_hz":
+            y_col = "mean_comp_bout_frequency_hz"
+            err_col = "sem_comp_bout_frequency_hz"
+            default_ylabel = "Competitive bout frequency (Hz)"
+        elif metric == "frequency_per_min":
+            y_col = "mean_comp_bout_frequency_per_min"
+            err_col = "sem_comp_bout_frequency_per_min"
+            default_ylabel = "Competitive bout frequency (/min)"
+        else:
+            raise ValueError("metric must be 'count', 'frequency_hz', or 'frequency_per_min'.")
+
+        if ax is None:
+            _, ax = plt.subplots(figsize=figsize)
+
+        x = plot_df["trial_number"].to_numpy()
+        y = plot_df[y_col].to_numpy()
+        yerr = plot_df[err_col].to_numpy()
+
+        ax.plot(x, y, color=error_color, linewidth=linewidth + 2, alpha=0.25, zorder=1)
+        ax.errorbar(
+            x,
+            y,
+            yerr=yerr,
+            color=color,
+            ecolor=error_color,
+            linewidth=linewidth,
+            marker=marker,
+            markersize=5,
+            capsize=capsize,
+            zorder=3,
+        )
+
+        ax.set_xlabel("Trial number", fontsize=11)
+        ax.set_ylabel(ylabel or default_ylabel, fontsize=11)
+        if title:
+            ax.set_title(title, fontsize=12)
+        if ylim is not None:
+            ax.set_ylim(*ylim)
+
+        ax.spines["top"].set_visible(False)
+        ax.spines["right"].set_visible(False)
+
+        return ax, plot_df, metric_df, raw_bout_df, merged_bout_df
 
 
 
