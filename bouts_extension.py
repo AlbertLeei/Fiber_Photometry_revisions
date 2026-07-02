@@ -2,6 +2,13 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+try:
+    from figure_settings import apply_plot_style, current_style, save_figure
+
+    apply_plot_style()
+except ImportError:
+    current_style = None
+    save_figure = None
 from scipy.stats import ttest_rel, linregress
 from sklearn.linear_model import LinearRegression
 from trial_class import *
@@ -479,6 +486,17 @@ def plot_behavior_across_bouts_no_identities(
     save=False,
     save_name=None,
     save_stats: str = None,       # path to save the t-test results CSV
+    ax=None,
+    show=True,
+    return_artists=False,
+    bar_width=0.6,
+    x_spacing=1.0,
+    x_margin=0.5,
+    capsize=3,
+    print_stats=True,
+    subject_dot_alpha=0.35,
+    show_subject_lines=True,
+    subject_line_alpha=0.35,
 ):
     # 1) Optional filter by behavior
     if behavior is not None:
@@ -497,68 +515,85 @@ def plot_behavior_across_bouts_no_identities(
     mean_values = pivot_df.mean()
     sem_values  = pivot_df.sem()
 
-    # 5) Create the figure
-    fig, ax = plt.subplots(figsize=figsize)
+    # 5) Create the figure or draw into an existing subplot axis
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+        created_fig = True
+    else:
+        fig = ax.figure
+        created_fig = False
+
+    style = current_style() if current_style is not None else None
+    label_size = style.label_size if style is not None else plt.rcParams["axes.labelsize"]
+    tick_size = style.tick_size if style is not None else plt.rcParams["xtick.labelsize"]
+    title_size = style.title_size if style is not None else plt.rcParams["axes.titlesize"]
+    axis_line_width = style.axis_line_width if style is not None else plt.rcParams["axes.linewidth"]
+    tick_width = style.tick_width if style is not None else plt.rcParams["xtick.major.width"]
+    tick_length = style.tick_length if style is not None else plt.rcParams["xtick.major.size"]
 
     # 6) Bars + error bars
+    x_positions = np.arange(len(pivot_df.columns)) * x_spacing
+
     bars = ax.bar(
-        np.arange(len(pivot_df.columns)),
+        x_positions,
         mean_values,
         yerr=sem_values,
-        capsize=6,
+        capsize=capsize,
         color=bar_color,
         edgecolor='black',
-        linewidth=5,
-        width=0.6,
-        error_kw=dict(elinewidth=3, capthick=3, zorder=5)
+        linewidth=axis_line_width,
+        width=bar_width,
+        error_kw=dict(elinewidth=axis_line_width, capthick=axis_line_width, zorder=5)
     )
 
     # 7) Individual subject lines + markers
     for subject in pivot_df.index:
-        x_vals = np.arange(len(pivot_df.columns))
+        x_vals = x_positions
         y_vals = np.asarray(pivot_df.loc[subject].values, dtype=float)
         valid = ~np.isnan(y_vals)
         left_valid = np.r_[False, valid[:-1]]
         right_valid = np.r_[valid[1:], False]
         connected = valid & (left_valid | right_valid)
 
-        ax.plot(
-            x_vals,
-            y_vals,
-            linestyle='-',
-            color='gray',
-            alpha=0.5,
-            linewidth=2.5,
-            zorder=1
-        )
+        if show_subject_lines:
+            ax.plot(
+                x_vals,
+                y_vals,
+                linestyle='-',
+                color='gray',
+                alpha=subject_line_alpha,
+                linewidth=style.line_width if style is not None else 1.5,
+                zorder=1
+            )
         ax.scatter(
             x_vals[connected],
             y_vals[connected],
             facecolors='none',
             edgecolors='gray',
-            s=120,
-            alpha=0.6,
-            linewidth=4,
+            s=(style.marker_size if style is not None else 4.0) ** 2,
+            alpha=subject_dot_alpha,
+            linewidth=axis_line_width,
             zorder=2
         )
 
     # 8) Labels & title
-    ax.set_title(title, fontsize=10)
-    ax.set_ylabel(ylabel or y_col, fontsize=35, labelpad=12)
-    ax.set_xlabel(xlabel, fontsize=35, labelpad=12)
+    ax.set_title(title or "", fontsize=title_size)
+    ax.set_ylabel(ylabel or y_col, fontsize=label_size, labelpad=6)
+    ax.set_xlabel(xlabel, fontsize=label_size, labelpad=6)
 
     # 9) X-ticks & custom labels/colors
-    ax.set_xticks(np.arange(len(pivot_df.columns)))
+    ax.set_xlim(x_positions[0] - x_margin, x_positions[-1] + x_margin)
+    ax.set_xticks(x_positions)
     if custom_xtick_labels:
-        ax.set_xticklabels(custom_xtick_labels, fontsize=35)
+        ax.set_xticklabels(custom_xtick_labels, fontsize=tick_size)
         if custom_xtick_colors:
             for tick, color in zip(ax.get_xticklabels(), custom_xtick_colors):
                 tick.set_color(color)
     else:
-        ax.set_xticklabels(pivot_df.columns, fontsize=26)
+        ax.set_xticklabels(pivot_df.columns, fontsize=tick_size)
 
-    ax.tick_params(axis='x', labelsize=35)
-    ax.tick_params(axis='y', labelsize=35)
+    ax.tick_params(axis='x', labelsize=tick_size, width=tick_width, length=tick_length)
+    ax.tick_params(axis='y', labelsize=tick_size, width=tick_width, length=tick_length)
 
     # 10) Y-limits (automatic or user‐provided)
     if ylim is None:
@@ -568,11 +603,11 @@ def plot_behavior_across_bouts_no_identities(
         upper = mx*1.1
         ax.set_ylim(lower, upper)
         if lower<0:
-            ax.axhline(0, color='black', linestyle='--', linewidth=2, zorder=1)
+            ax.axhline(0, color='black', linestyle='--', linewidth=axis_line_width, zorder=1)
     else:
         ax.set_ylim(ylim)
         if ylim[0]<0:
-            ax.axhline(0, color='black', linestyle='--', linewidth=2, zorder=1)
+            ax.axhline(0, color='black', linestyle='--', linewidth=axis_line_width, zorder=1)
 
     # 11) Custom y-ticks
     if yticks_increment:
@@ -583,15 +618,20 @@ def plot_behavior_across_bouts_no_identities(
     # 12) Spines
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
-    ax.spines['left'].set_linewidth(5)
-    ax.spines['bottom'].set_linewidth(5)
+    ax.spines['left'].set_linewidth(axis_line_width)
+    ax.spines['bottom'].set_linewidth(axis_line_width)
 
-    plt.tight_layout()
+    if created_fig:
+        fig.tight_layout()
     if save:
         if not save_name:
             raise ValueError("save_name must be provided if save=True")
-        plt.savefig(save_name, transparent=True, bbox_inches='tight', pad_inches=pad_inches)
-    plt.show()
+        if save_figure is not None:
+            save_figure(fig, save_name, pad_inches=pad_inches)
+        else:
+            fig.savefig(save_name, transparent=True, bbox_inches='tight', pad_inches=pad_inches)
+    if show and created_fig:
+        plt.show()
 
     # ——————————————————————————————————
     # 13) Paired t-tests, store in DataFrame
@@ -624,8 +664,12 @@ def plot_behavior_across_bouts_no_identities(
     if save_stats:
         stats_df.to_csv(save_stats, index=False)
 
-    print("\nPaired t-test results:")
-    print(stats_df.to_string(index=False, float_format="%.4f"))
+    if print_stats:
+        print("\nPaired t-test results:")
+        print(stats_df.to_string(index=False, float_format="%.4f"))
+
+    if return_artists:
+        return pivot_df, stats_df, fig, ax
 
     # return both pivot & stats
     return pivot_df, stats_df
@@ -842,7 +886,16 @@ def plot_peak_for_subsequent_behaviors(
     tick_label_fontsize=35,
     legend_fontsize=30,
     save=False,
-    save_path="peaks_for_subsequent_behaviors.png"
+    save_path="peaks_for_subsequent_behaviors.png",
+    ax=None,
+    show=True,
+    return_artists=False,
+    line_width=None,
+    marker_size=None,
+    capsize=3,
+    legend=True,
+    legend_loc="best",
+    legend_bbox_to_anchor=None,
 ):
     import pandas as pd
     import numpy as np
@@ -902,12 +955,35 @@ def plot_peak_for_subsequent_behaviors(
     if custom_colors is None:
         custom_colors = plt.rcParams["axes.prop_cycle"].by_key()["color"]
 
-    fig, ax = plt.subplots(figsize=figsize)
+    if ax is None:
+        fig, ax = plt.subplots(figsize=figsize)
+        created_fig = True
+    else:
+        fig = ax.figure
+        created_fig = False
+
+    style = current_style() if current_style is not None else None
+    label_size = style.label_size if style is not None else axis_label_fontsize
+    tick_size = style.tick_size if style is not None else tick_label_fontsize
+    legend_size = style.legend_size if style is not None else legend_fontsize
+    title_size = style.title_size if style is not None else 10
+    axis_line_width = style.axis_line_width if style is not None else 1.0
+    tick_width = style.tick_width if style is not None else plt.rcParams["xtick.major.width"]
+    tick_length = style.tick_length if style is not None else plt.rcParams["xtick.major.size"]
+    line_width = line_width if line_width is not None else (style.line_width if style is not None else 3)
+    marker_size = marker_size if marker_size is not None else (style.marker_size if style is not None else 6)
+
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
-    ax.spines["left"].set_linewidth(5)
-    ax.spines["bottom"].set_linewidth(5)
-    ax.tick_params(axis="both", which="major", labelsize=tick_label_fontsize)
+    ax.spines["left"].set_linewidth(axis_line_width)
+    ax.spines["bottom"].set_linewidth(axis_line_width)
+    ax.tick_params(
+        axis="both",
+        which="major",
+        labelsize=tick_size,
+        width=tick_width,
+        length=tick_length,
+    )
 
     metrics_dict = {}
     unique_bouts = line_order if line_order else sorted(agg_df["Bout"].dropna().unique())
@@ -971,16 +1047,16 @@ def plot_peak_for_subsequent_behaviors(
             yerr=y_err,
             marker='o', linestyle='-',
             color=color,
-            linewidth=3, markersize=18,
-            capsize=6,
-            elinewidth=3,
-            capthick=3,
+            linewidth=line_width, markersize=marker_size,
+            capsize=capsize,
+            elinewidth=axis_line_width,
+            capthick=axis_line_width,
             label=legend_label,
             zorder=3
         )
 
-    ax.set_xlabel(xlabel, fontsize=axis_label_fontsize, labelpad=12)
-    ax.set_ylabel(ylabel, fontsize=axis_label_fontsize, labelpad=12)
+    ax.set_xlabel(xlabel, fontsize=label_size, labelpad=6)
+    ax.set_ylabel(ylabel, fontsize=label_size, labelpad=6)
 
     if ylim is not None:
         ax.set_ylim(ylim)
@@ -988,29 +1064,43 @@ def plot_peak_for_subsequent_behaviors(
             y_ticks = np.arange(ylim[0], ylim[1] + ytick_increment, ytick_increment)
             ax.set_yticks(y_ticks)
             y_tick_labels = [f"{int(yt)}" if float(yt).is_integer() else f"{yt:.1f}" for yt in y_ticks]
-            ax.set_yticklabels(y_tick_labels, fontsize=tick_label_fontsize)
+            ax.set_yticklabels(y_tick_labels, fontsize=tick_size)
 
     if custom_xtick_labels:
         ax.set_xticks(np.arange(1, len(custom_xtick_labels) + 1))
-        ax.set_xticklabels(custom_xtick_labels, fontsize=tick_label_fontsize)
+        ax.set_xticklabels(custom_xtick_labels, fontsize=tick_size)
     else:
         unique_x = np.arange(1, n_subsequent_behaviors + 1)
         ax.set_xticks(unique_x)
-        ax.set_xticklabels([str(x) for x in unique_x], fontsize=tick_label_fontsize)
+        ax.set_xticklabels([str(x) for x in unique_x], fontsize=tick_size)
 
     if plot_title:
-        ax.set_title(plot_title, fontsize=10)
+        ax.set_title(plot_title, fontsize=title_size)
 
-    ax.legend(fontsize=legend_fontsize)
-    plt.tight_layout()
+    if legend:
+        ax.legend(
+            fontsize=legend_size,
+            loc=legend_loc,
+            bbox_to_anchor=legend_bbox_to_anchor,
+            frameon=False,
+        )
+    if created_fig:
+        fig.tight_layout()
 
     if save and save_path:
-        plt.savefig(save_path, transparent=True, bbox_inches='tight', pad_inches=0.1, dpi=300)
+        if save_figure is not None:
+            save_figure(fig, save_path, pad_inches=0.1)
+        else:
+            fig.savefig(save_path, transparent=True, bbox_inches='tight', pad_inches=0.1, dpi=300)
 
-    plt.show()
+    if show and created_fig:
+        plt.show()
 
     print(f"\n=== Computed Metric ({metric_type.upper()}): ===")
     for bout, val in metrics_dict.items():
         print(f"Bout: {bout}, {metric_type} = {val:.3f}" if not np.isnan(val) else f"Bout: {bout}, {metric_type} = N/A")
+
+    if return_artists:
+        return agg_df, fig, ax
 
     return agg_df
