@@ -1094,11 +1094,11 @@ class Reward_Competition(RTC):
                             label="SEM")
 
             # vertical onset lines
-            ax.axvline(0, color="k",      ls="--", lw=2)
+            ax.axvline(0, color="k",      ls=":", lw=2)
 
             # labels & title
-            ax.set_xlabel("Time (s)",         fontsize=14)
-            ax.set_ylabel("z-scored ΔF/F",    fontsize=14)
+            ax.set_xlabel("Time (s)",         fontsize=18)
+            ax.set_ylabel("z-scored ΔF/F",    fontsize=18)
             if title:
                 ax.set_title(title, fontsize=18, fontweight='bold')
             else:
@@ -1110,19 +1110,19 @@ class Reward_Competition(RTC):
 
             # ticks & layout
             ax.set_xticks([pre_window, 0, post_time])
-            ax.tick_params(axis='both', which='major', labelsize=12, length=6, width=1.5)
+            ax.tick_params(axis='both', which='major', labelsize=18, length=6, width=3)
 
             # remove top & right spines
             ax.spines['top'].set_visible(False)
             ax.spines['right'].set_visible(False)
-            ax.spines['bottom'].set_linewidth(1.5)
-            ax.spines['left'].set_linewidth(1.5)
+            ax.spines['bottom'].set_linewidth(2)
+            ax.spines['left'].set_linewidth(2)
 
             plt.tight_layout()
 
             if save_path:
                 os.makedirs(os.path.dirname(save_path), exist_ok=True)
-                fig.savefig(save_path, dpi=300, bbox_inches="tight")
+                fig.savefig(save_path, dpi=300, bbox_inches="tight", transparent=True)
 
             plt.show()
     """**********************REWARD INDUCED COMPETITION*******************************"""
