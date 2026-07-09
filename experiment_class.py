@@ -2,7 +2,14 @@ import numpy as np
 import pandas as pd
 import tdt
 import os
+import pickle
 import matplotlib.pyplot as plt
+try:
+    from figure_settings import apply_plot_style
+
+    apply_plot_style()
+except ImportError:
+    pass
 from scipy.optimize import curve_fit
 from sklearn.linear_model import LinearRegression
 from scipy.signal import butter, filtfilt
@@ -20,6 +27,33 @@ class Experiment:
 
         if not RTC:
             self.load_trials()
+
+    def save_preprocessed(self, save_path):
+        """
+        Save the current experiment object so processed trials and derived
+        analysis tables can be reused without rerunning the pipeline.
+        """
+        save_path = os.path.abspath(os.fspath(save_path))
+        save_dir = os.path.dirname(save_path)
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
+        with open(save_path, "wb") as f:
+            pickle.dump(self, f, protocol=pickle.HIGHEST_PROTOCOL)
+        print(f"Saved Experiment object to {save_path}")
+        return save_path
+
+    @classmethod
+    def load_preprocessed(cls, save_path):
+        """Load a previously saved Experiment object."""
+        save_path = os.path.abspath(os.fspath(save_path))
+        with open(save_path, "rb") as f:
+            exp = pickle.load(f)
+        if not isinstance(exp, cls):
+            raise TypeError(
+                f"Expected a saved {cls.__name__} object, got {type(exp).__name__}."
+            )
+        print(f"Loaded Experiment object from {save_path}")
+        return exp
     
 
     '''********************************** GROUP PROCESSING **********************************'''

@@ -3,6 +3,12 @@ import pandas as pd
 import tdt
 import os
 import matplotlib.pyplot as plt
+try:
+    from figure_settings import apply_plot_style
+
+    apply_plot_style()
+except ImportError:
+    pass
 
 from trial_class2 import Trial2
 

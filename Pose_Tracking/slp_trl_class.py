@@ -6,6 +6,12 @@ sys.path.append(PROJECT_ROOT)
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
+try:
+    from figure_settings import apply_plot_style
+
+    apply_plot_style()
+except ImportError:
+    pass
 from trial_class import Trial
 import h5py
 from scipy.interpolate import interp1d

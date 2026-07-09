@@ -9,6 +9,12 @@ from trial_class import Trial
 import math
 import numpy as np
 import matplotlib.pyplot as plt
+try:
+    from figure_settings import apply_plot_style
+
+    apply_plot_style()
+except ImportError:
+    pass
 import pandas as pd
 from scipy.signal import find_peaks
 
@@ -573,12 +579,13 @@ class RTC(Experiment):
                     tone_window: tuple[float, float] = (-4, 10),
                     pe_window: tuple[float, float] = (-4, 10),
                     tone_baseline_window: tuple[float, float] = (-4, 0),
-                    pe_baseline_window: tuple[float, float] = (-2, 0)):
+                    pe_baseline_window: tuple[float, float] = (-4, 0)):
         """
         Compute baseline-corrected peri-event z-score traces for Tone and PE.
 
         tone_baseline_window is relative to cue.
-        pe_baseline_window   is relative to the PE (port entry / first lick).
+        pe_baseline_window is also relative to cue, so PE/reward traces use the
+        same pre-tone baseline as tone traces even though they are aligned to PE.
         """
         df = self.da_df
 
@@ -639,7 +646,7 @@ class RTC(Experiment):
             tone_z.append(tz_list)
             tone_t.append(tt_list)
 
-            # —— PE processing (UPDATED: baseline relative to PE) ——
+            # —— PE processing: align to PE, baseline relative to the matching cue ——
             pz_list, pt_list = [], []
             for i, pe in enumerate(pes):
                 if len(cues) == 40 and i == 39:
@@ -650,9 +657,12 @@ class RTC(Experiment):
                     pt_list.append(pe_axis.copy())
                     continue
 
-                # baseline computed from seconds before PE (pe_baseline_window)
-                bmask = (ts >= pe + pe_bl_start) & (ts <= pe + pe_bl_end)
-                base_val = np.nanmean(zs[bmask]) if bmask.any() else 0.0
+                cue = cues[i] if i < len(cues) else None
+                if cue is not None and not (isinstance(cue, float) and np.isnan(cue)):
+                    bmask = (ts >= cue + pe_bl_start) & (ts <= cue + pe_bl_end)
+                    base_val = np.nanmean(zs[bmask]) if bmask.any() else 0.0
+                else:
+                    base_val = 0.0
 
                 mask = (ts >= pe + pe_start) & (ts <= pe + pe_end)
                 if not mask.any():

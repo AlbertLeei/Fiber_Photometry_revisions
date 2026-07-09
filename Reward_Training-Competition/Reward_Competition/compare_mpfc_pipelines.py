@@ -12,6 +12,13 @@ PARENT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")
 if PARENT_DIR not in sys.path:
     sys.path.append(PARENT_DIR)
 
+try:
+    from figure_settings import apply_plot_style
+
+    apply_plot_style()
+except ImportError:
+    pass
+
 from trial_class import Trial
 
 

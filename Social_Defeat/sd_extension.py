@@ -1,5 +1,11 @@
 import numpy as np
 import matplotlib.pyplot as plt
+try:
+    from figure_settings import apply_plot_style
+
+    apply_plot_style()
+except ImportError:
+    pass
 import os
 
 

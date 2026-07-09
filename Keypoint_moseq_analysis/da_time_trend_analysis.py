@@ -6,10 +6,16 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import seaborn as sns
+try:
+    from figure_settings import apply_plot_style
+
+    apply_plot_style()
+except ImportError:
+    pass
 from scipy import stats
 
 
-sns.set_style("whitegrid")
+sns.set_style("ticks")
 pd.set_option("display.max_columns", 200)
 pd.set_option("display.width", 200)
 

@@ -12,6 +12,12 @@ from experiment_class import Experiment
 from trial_class import Trial
 import numpy as np
 import matplotlib.pyplot as plt
+try:
+    from figure_settings import apply_plot_style
+
+    apply_plot_style()
+except ImportError:
+    pass
 import pandas as pd
 import pickle
 from scipy.interpolate import interp1d

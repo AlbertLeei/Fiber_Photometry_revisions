@@ -2,6 +2,12 @@ import numpy as np
 import pandas as pd
 import tdt
 import matplotlib.pyplot as plt
+try:
+    from figure_settings import apply_plot_style
+
+    apply_plot_style()
+except ImportError:
+    pass
 import os
 from scipy.signal import butter, filtfilt, find_peaks
 

@@ -12,6 +12,12 @@ import math
 import glob
 import numpy as np
 import matplotlib.pyplot as plt
+try:
+    from figure_settings import apply_plot_style
+
+    apply_plot_style()
+except ImportError:
+    pass
 import seaborn as sns
 import pandas as pd
 import itertools

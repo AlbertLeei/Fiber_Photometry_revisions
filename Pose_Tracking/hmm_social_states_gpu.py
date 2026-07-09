@@ -3,6 +3,12 @@ import math
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+try:
+    from figure_settings import apply_plot_style
+
+    apply_plot_style()
+except ImportError:
+    pass
 import numpy as np
 import pandas as pd
 import torch

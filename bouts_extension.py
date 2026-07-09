@@ -497,6 +497,14 @@ def plot_behavior_across_bouts_no_identities(
     subject_dot_alpha=0.35,
     show_subject_lines=True,
     subject_line_alpha=0.35,
+    xtick_rotation=0,
+    xtick_ha="center",
+    stats_comparisons=None,
+    stats_correction_method="holm",
+    show_stats_annotations=False,
+    stats_annotation_alpha=0.05,
+    stats_annotation_y_offset=0.08,
+    stats_annotation_step=0.07,
 ):
     # 1) Optional filter by behavior
     if behavior is not None:
@@ -585,12 +593,12 @@ def plot_behavior_across_bouts_no_identities(
     ax.set_xlim(x_positions[0] - x_margin, x_positions[-1] + x_margin)
     ax.set_xticks(x_positions)
     if custom_xtick_labels:
-        ax.set_xticklabels(custom_xtick_labels, fontsize=tick_size)
+        ax.set_xticklabels(custom_xtick_labels, fontsize=tick_size, rotation=xtick_rotation, ha=xtick_ha)
         if custom_xtick_colors:
             for tick, color in zip(ax.get_xticklabels(), custom_xtick_colors):
                 tick.set_color(color)
     else:
-        ax.set_xticklabels(pivot_df.columns, fontsize=tick_size)
+        ax.set_xticklabels(pivot_df.columns, fontsize=tick_size, rotation=xtick_rotation, ha=xtick_ha)
 
     ax.tick_params(axis='x', labelsize=tick_size, width=tick_width, length=tick_length)
     ax.tick_params(axis='y', labelsize=tick_size, width=tick_width, length=tick_length)
@@ -661,12 +669,67 @@ def plot_behavior_across_bouts_no_identities(
 
     stats_df = pd.DataFrame(rows)
 
+    stats_plot_df = stats_df
+    if stats_comparisons is not None:
+        stats_plot_df = apply_multiple_comparisons(
+            stats_df,
+            method=stats_correction_method,
+            alpha=stats_annotation_alpha,
+            comparisons=stats_comparisons,
+            print_results=print_stats,
+        )
+    elif show_stats_annotations:
+        stats_plot_df = apply_multiple_comparisons(
+            stats_df,
+            method=stats_correction_method,
+            alpha=stats_annotation_alpha,
+            print_results=print_stats,
+        )
+
+    if show_stats_annotations:
+        sig_col = "p_adj" if "p_adj" in stats_plot_df.columns else "p_value"
+        y_min, y_max = ax.get_ylim()
+        y_range = y_max - y_min if y_max > y_min else 1
+        all_plot_values = np.concatenate([
+            pivot_df.values.flatten(),
+            mean_values.values.flatten(),
+            (mean_values + sem_values).values.flatten(),
+        ])
+        data_top = np.nanmax(all_plot_values) if np.any(~np.isnan(all_plot_values)) else y_max
+        start_y = data_top + stats_annotation_y_offset * y_range
+        step = stats_annotation_step * y_range
+        bout_to_x = {bout: x for bout, x in zip(pivot_df.columns, x_positions)}
+        plotted_annotation_count = 0
+
+        for _, row in stats_plot_df.reset_index(drop=True).iterrows():
+            p_val = row.get(sig_col, np.nan)
+            if pd.isna(p_val) or p_val >= stats_annotation_alpha:
+                continue
+
+            comparison = str(row["comparison"])
+            if " vs " not in comparison:
+                continue
+            bout_a, bout_b = comparison.split(" vs ", 1)
+            if bout_a not in bout_to_x or bout_b not in bout_to_x:
+                continue
+
+            x1, x2 = bout_to_x[bout_a], bout_to_x[bout_b]
+            y = start_y + plotted_annotation_count * step
+            h = 0.015 * y_range
+            label = "***" if p_val < 0.001 else "**" if p_val < 0.01 else "*"
+            annotation_top = y + h * 1.5
+            if annotation_top > ax.get_ylim()[1]:
+                ax.set_ylim(y_min, annotation_top + 0.04 * y_range)
+            ax.plot([x1, x1, x2, x2], [y - h, y, y, y - h], color="black", linewidth=axis_line_width, clip_on=False)
+            ax.text((x1 + x2) / 2, y + h * 0.3, label, ha="center", va="bottom", fontsize=tick_size, clip_on=False)
+            plotted_annotation_count += 1
+
     if save_stats:
-        stats_df.to_csv(save_stats, index=False)
+        stats_plot_df.to_csv(save_stats, index=False)
 
     if print_stats:
         print("\nPaired t-test results:")
-        print(stats_df.to_string(index=False, float_format="%.4f"))
+        print(stats_plot_df.to_string(index=False, float_format="%.4f"))
 
     if return_artists:
         return pivot_df, stats_df, fig, ax
@@ -679,7 +742,8 @@ def apply_multiple_comparisons(
     stats_df: pd.DataFrame,
     method: str = 'holm',
     alpha: float = 0.05,
-    comparisons: list = None
+    comparisons: list = None,
+    print_results: bool = True,
 ):
     """
     Run a multiple‐testing correction on the rows in stats_df.
@@ -698,8 +762,9 @@ def apply_multiple_comparisons(
     df['reject'] = reject
     df['sig']    = np.where(reject, '✔', 'ns')
 
-    print(f"\n{method.capitalize()}‐corrected results (α={alpha}):")
-    print(df[['comparison','p_value','p_adj','sig']].to_string(index=False, float_format="%.4f"))
+    if print_results:
+        print(f"\n{method.capitalize()}-corrected results (alpha={alpha}):")
+        print(df[['comparison','p_value','p_adj','sig']].to_string(index=False, float_format="%.4f"))
     return df
 
 
